@@ -1550,11 +1550,13 @@ type createTaskReq struct {
 // autoRouteAgent scans the task description and goal for keywords and returns
 // the best-matching specialized agent key. Empty = no match (use default
 // planner/worker). Lets users create a task without manually picking an agent.
-// Order matters: specific patterns (小程序/移动端) checked before the generic
-// 渗透 catch-all.
+// Order matters: specific patterns (攻防/小程序/移动端) checked before the
+// generic 渗透 catch-all.
 func autoRouteAgent(description, goal string) string {
 	t := strings.ToLower(description + " " + goal)
 	switch {
+	case containsAny(t, "攻防演练", "攻防", "红队", "red team", "redteam", "演练"):
+		return "redteam"
 	case containsAny(t, "小程序", "miniprogram", "wxapkg", "微信小程序"):
 		return "miniprogram"
 	case containsAny(t, "移动端", "android", "ios", "apk", "app测试", "移动应用"):
