@@ -165,11 +165,17 @@ type Traffic struct {
 	// reason; connections to them are tunneled transparently (fail-open) so the
 	// request still reaches the target — unrecorded — instead of being killed.
 	pass sync.Map // hostname(string) -> struct{}
-	// upstream is the global egress proxy every captured request is forwarded
-	// through (nil = dial targets directly). Both the intercepted and the
-	// transparent-passthrough paths honor it (go-mitmproxy's getUpstreamConn),
-	// so no host escapes it. Hot-swappable at runtime via SetUpstreamProxy.
+	// upstream is the global egress proxy captured requests are forwarded through
+	// (nil = dial targets directly). Hot-swappable at runtime via SetUpstreamProxy.
+	// It is NOT unconditional: egress rules and a direct-dial probe decide per
+	// request whether the upstream applies at all — see egress.go for why.
 	upstream atomic.Pointer[url.URL]
+	// egress holds the operator's explicit split ("always direct" / "always via
+	// upstream"). Nil means "no overrides": decide by probe.
+	egress atomic.Pointer[egressRules]
+	// probes caches dial verdicts so the per-request split costs one TCP
+	// handshake per address at most, not one per request.
+	probes sync.Map // addr(string) -> *dialProbe
 }
 
 // Open initializes the traffic tree, blob store and SQLite index under dir.
@@ -215,10 +221,22 @@ func Open(dir, addr string) (*Traffic, error) {
 	// http.ProxyFromEnvironment, so an HTTP_PROXY/HTTPS_PROXY in the environment
 	// (a VPN/system proxy) would make it forward target requests through that
 	// external proxy — which can't reach the target → 502. Returning nil forces
-	// a direct dial. When a global egress proxy IS configured (SetUpstreamProxy),
-	// every captured request — intercepted AND transparently tunneled — is
-	// forwarded through it instead, so no host leaks the real source IP.
-	p.SetUpstreamProxy(func(*http.Request) (*url.URL, error) { return t.upstream.Load(), nil })
+	// a direct dial.
+	//
+	// A configured global egress proxy is likewise not applied blindly: it is a
+	// fallback for targets we cannot reach ourselves, not a mandatory detour.
+	// preferDirect decides per request (operator overrides, private addresses,
+	// then a cached direct-dial probe) — see egress.go.
+	p.SetUpstreamProxy(func(req *http.Request) (*url.URL, error) {
+		up := t.upstream.Load()
+		if up == nil {
+			return nil, nil
+		}
+		if t.preferDirect(req) {
+			return nil, nil
+		}
+		return up, nil
+	})
 	// Fail-open: MITM every host by default, EXCEPT ones a prior request proved we
 	// can't intercept without breaking (see maybePassthrough). Those are tunneled
 	// transparently so the request still reaches the target instead of being killed.

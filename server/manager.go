@@ -279,6 +279,13 @@ const (
 	// (http/https/socks5). Empty = direct. Distinct from web_search_proxy (which
 	// only routes the search backend) and the per-profile LLM proxy.
 	settingGlobalProxy = "global_proxy"
+	// settingTrafficEgressDirect / settingTrafficEgressProxy 是录制代理的显式
+	// 出口分流名单（逗号分隔的 host 后缀）。默认都为空：此时由 traffic 包自动
+	// 判断（私网直连 + 直连探测），只有自动判断不合意时才需要填。
+	//   direct —— 强制直连，例如目标自己的域名，避免绕海外节点变慢
+	//   proxy  —— 强制经全局出口，例如必须隐藏源 IP、或只有出口才连得上的目标
+	settingTrafficEgressDirect = "traffic_egress_direct"
+	settingTrafficEgressProxy  = "traffic_egress_proxy"
 	settingWorkers     = "workers"
 	settingLLMRecord   = "llm_record"
 	// LLM 轮询(故障转移)。默认关闭——开启后走「全局激活配置」的 agent 在当前配置
@@ -447,9 +454,11 @@ func NewManager(dir, proxyAddr string) (*Manager, error) {
 	if v, ok, _ := pg.GetSetting(settingWebSearchProxy); ok {
 		m.webSearchProxy = v
 	}
-	// Global egress proxy (default: direct). When capture is on, feed it to the
-	// MITM as its upstream so recorded traffic exits through it; when capture is
-	// off, ProxyAddr hands it to agents directly (bash env / WebFetch).
+	// Global egress proxy (default: direct). When capture is on it becomes the
+	// MITM's upstream, but NOT unconditionally: targets that dial fine on their
+	// own are sent out directly so they are no slower than an unrecorded request
+	// (see traffic/egress.go). When capture is off, ProxyAddr hands it to agents
+	// directly (bash env / WebFetch).
 	if v, ok, _ := pg.GetSetting(settingGlobalProxy); ok {
 		m.globalProxy = strings.TrimSpace(v)
 	}
@@ -457,6 +466,7 @@ func NewManager(dir, proxyAddr string) (*Manager, error) {
 		if err := m.traffic.SetUpstreamProxy(m.globalProxy); err != nil {
 			log.Printf("[proxy] 全局代理 %q 无效，已忽略: %v", m.globalProxy, err)
 		}
+		m.loadEgressRules(pg)
 	}
 	m.enrich = enrich.New(m.assets, m.ProxyAddr, 4)
 	// Reconcile the seeded browser MCP with the persisted capture state, so a
@@ -816,6 +826,44 @@ func (m *Manager) SetGlobalProxy(raw string) error {
 	}
 	// Keep the browser MCP's egress in sync with the new global proxy too.
 	m.syncBrowserMCPProxy()
+	return nil
+}
+
+// loadEgressRules 从 settings 读出口分流名单并应用；缺省即空，表示不设显式
+// 规则、完全交给 traffic 包自动判断（私网直连 + 直连探测）。
+func (m *Manager) loadEgressRules(pg *pgdb.DB) {
+	direct, okDirect, _ := pg.GetSetting(settingTrafficEgressDirect)
+	if !okDirect {
+		direct = ""
+	}
+	forced, okForced, _ := pg.GetSetting(settingTrafficEgressProxy)
+	if !okForced {
+		forced = ""
+	}
+	m.traffic.SetEgressRules(direct, forced)
+}
+
+// EgressRules returns the operator's explicit egress overrides (may be empty).
+func (m *Manager) EgressRules() (direct, proxy string) {
+	direct, _, _ = m.pg.GetSetting(settingTrafficEgressDirect)
+	proxy, _, _ = m.pg.GetSetting(settingTrafficEgressProxy)
+	return strings.TrimSpace(direct), strings.TrimSpace(proxy)
+}
+
+// SetEgressRules persists and applies the explicit egress overrides (comma
+// separated host suffixes; empty clears). Takes effect on the next connection —
+// no restart and no proxy rebuild.
+func (m *Manager) SetEgressRules(direct, proxy string) error {
+	direct, proxy = strings.TrimSpace(direct), strings.TrimSpace(proxy)
+	if err := m.pg.SetSetting(settingTrafficEgressDirect, direct); err != nil {
+		return err
+	}
+	if err := m.pg.SetSetting(settingTrafficEgressProxy, proxy); err != nil {
+		return err
+	}
+	if m.traffic != nil {
+		m.traffic.SetEgressRules(direct, proxy)
+	}
 	return nil
 }
 
