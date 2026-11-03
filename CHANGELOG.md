@@ -4,6 +4,16 @@
 
 ## [Unreleased]
 
+### 部署与脚本
+
+#### 修复的问题
+
+- **修复 Docker 部署会卡在拉一个不存在的镜像上**：`docker-compose.yml` 里写了 `image:` 而该镜像从未发布，compose 默认 `pull_policy=missing`，本地没有就先试 pull，拉不到直接失败退出、**不会回退去构建**。等于 `docker compose up` 必挂。现改为只保留 `build:`，镜像一律从源码就地构建。
+- **修复 `update.sh` 的 Docker 升级路径**：原先 `docker compose pull artex` 拉新版镜像，同样依赖远程镜像存在。现改为 `docker compose build artex`，版本由 `git pull` 拿到的代码决定。
+- **修复宿主机 8787 被占用时无法部署**：端口改为 `${ARTEX_PORT:-8787}:8787`，可在 `.env` 覆盖。
+- **补齐 `.env.example`**：补上 `ARTEX_PORT`、`OOB_PUBLIC_HOST`、`OOB_PORT_1/2/3`、`OOB_PORTS`，去掉已无意义的 `ARTEX_TAG`；OOB 三个监听端口被占用时不用再改 compose 文件。
+- **修正文档里的 `cd ARTEX`**：仓库名是 `artex-full`，克隆后按文档敲 `cd ARTEX` 会失败。
+
 ## [0.3.18] - 2026-11-03
 
 ### 代理边车

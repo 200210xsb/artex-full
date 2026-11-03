@@ -45,8 +45,10 @@ install_docker(){
   else
     info "沿用已存在的 .env"
   fi
-  info "拉取镜像并启动…"
-  docker compose pull || true
+  # artex 镜像从源码就地构建（compose 里刻意没有 image:），postgres / oob 用到的
+  # 基础镜像会在 up 时按需拉取。首次构建要下依赖，几分钟是正常的。
+  info "构建 artex 镜像并启动（首次构建需下载依赖，耗时几分钟）…"
+  docker compose build
   docker compose up -d
   # OOB 监听器随 compose 一起起；没配公网地址的话页面会一直是空的。
   if ! grep -q '^OOB_PUBLIC_HOST=..*' .env 2>/dev/null; then

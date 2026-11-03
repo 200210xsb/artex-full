@@ -15,9 +15,12 @@ services:
     restart: unless-stopped
 
   artex:
-    # 镜像由本仓库源码就地构建，不依赖任何第三方预编译镜像：
+    # 镜像从本仓库源码就地构建，不引用任何远程预构建镜像：
     #   docker compose build && docker compose up -d
-    image: 200210xsb/artex:${ARTEX_TAG:-latest}
+    #
+    # 这里刻意不写 image:。写了的话 compose 默认 pull_policy=missing，
+    # 本地没有该镜像时会先尝试 pull，拉不到就直接失败退出——不会回退去构建。
+    # 指到一个没人维护/根本不存在的远程镜像名时，`up` 必挂。
     build:
       context: .
       dockerfile: Dockerfile
@@ -35,7 +38,8 @@ services:
       # 回连监听（oob 服务）写库的位置，页面侧只读打开它
       OOB_DATA_DIR: /app/data/oob
     ports:
-      - "8787:8787"
+      # 宿主机端口被占用时改 .env 里的 ARTEX_PORT，别改右边（容器内固定 8787）
+      - "${ARTEX_PORT:-8787}:8787"
       - "127.0.0.1:8788:8788"
     volumes:
       # 把数据目录（含 jwt.key、SQLite 等）绑定到项目根目录的 data/，
