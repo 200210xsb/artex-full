@@ -184,8 +184,12 @@ func (s *AssetStore) RegisterTaskAssetScopes(taskID int64, inputs []ScopeInput) 
 				taskScope.Kind = "subdomain"
 			}
 			taskScope.Domain = rule.Domain
+			// 子域名规则落到 type='subdomain' 行，重复注册时要按同一类型回查，
+			// 否则每次都被当成新关联（AssetsLinked 而不是 AssetsExisting）。
 			var alreadyLinked bool
-			err := tx.QueryRow(`SELECT id, $2=ANY(task_ids) FROM assets WHERE type='root_domain' AND domain=$1`, rule.Domain, taskID).
+			err := tx.QueryRow(`
+SELECT id, $2=ANY(task_ids) FROM assets
+WHERE type=$3 AND domain=$1 AND COALESCE(record_type,'')=''`, rule.Domain, taskID, taskScope.Kind).
 				Scan(&assetID, &alreadyLinked)
 			if err != nil && !errors.Is(err, sql.ErrNoRows) {
 				return mutation, err

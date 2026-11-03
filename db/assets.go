@@ -367,9 +367,21 @@ func (s *AssetStore) UpsertRootDomain(req UpsertRootDomainReq) (int64, error) {
 	// inventory. root_domain is the column attribution joins on
 	// (companies.go: a.root_domain = cs.domain) and company_scope stores roots,
 	// so it is the one that has to be normalized.
-	root, _ := RootDomain(domain)
+	root, isApex := RootDomain(domain)
 	if root == "" {
-		root = domain
+		root, isApex = domain, true
+	}
+	if !isApex {
+		// A "root_domain" item whose host is really a subdomain is a lie about the
+		// taxonomy: the inventory, the company page and every consumer that trusts
+		// the type all treat one host as if it covered the whole registrable
+		// domain. Route it to the subdomain row instead — that path also ensures
+		// the real root row exists, so nothing is lost by not writing it here.
+		return s.upsertSubdomainOnly(UpsertSubdomainReq{
+			Domain: domain,
+			ICP:    req.ICP,
+			TaskID: req.TaskID,
+		})
 	}
 	if s.tx == nil {
 		return s.withCompanyScopeMutation(func(scoped *AssetStore) (int64, error) {
@@ -566,15 +578,35 @@ type UpsertSubdomainReq struct {
 
 // UpsertSubdomain idempotently inserts or merges a subdomain asset and triggers
 // side effects: root_domain upsert + IP bound_domains update.
-func (s *AssetStore) UpsertSubdomain(req UpsertSubdomainReq) (id int64, err error) {
+func (s *AssetStore) UpsertSubdomain(req UpsertSubdomainReq) (int64, error) {
+	if s.tx == nil {
+		return s.withCompanyScopeMutation(func(scoped *AssetStore) (int64, error) {
+			return scoped.upsertSubdomain(req, true)
+		})
+	}
+	return s.upsertSubdomain(req, true)
+}
+
+// upsertSubdomainOnly records the host row alone. Used when a caller is not doing
+// DNS discovery — e.g. UpsertRootDomain demoting a host that is really a
+// subdomain — so the write never invents adjacent assets (a parent root row, the
+// A/AAAA addresses) that the operator never declared.
+func (s *AssetStore) upsertSubdomainOnly(req UpsertSubdomainReq) (int64, error) {
+	if s.tx == nil {
+		return s.withCompanyScopeMutation(func(scoped *AssetStore) (int64, error) {
+			return scoped.upsertSubdomain(req, false)
+		})
+	}
+	return s.upsertSubdomain(req, false)
+}
+
+// upsertSubdomain writes one type='subdomain' row. sideEffects carries the
+// DNS-discovery extras: materialize the registrable root, and for A/AAAA records
+// the addresses it points at.
+func (s *AssetStore) upsertSubdomain(req UpsertSubdomainReq, sideEffects bool) (id int64, err error) {
 	domain := DomainKey(req.Domain)
 	if domain == "" {
 		return 0, fmt.Errorf("domain is required")
-	}
-	if s.tx == nil {
-		return s.withCompanyScopeMutation(func(scoped *AssetStore) (int64, error) {
-			return scoped.UpsertSubdomain(req)
-		})
 	}
 
 	rootDomain, _ := RootDomain(domain)
@@ -589,16 +621,18 @@ func (s *AssetStore) UpsertSubdomain(req UpsertSubdomainReq) (id int64, err erro
 		return 0, err
 	}
 
-	// side effect 1: ensure root domain exists
-	_, _ = s.UpsertRootDomain(UpsertRootDomainReq{
-		Domain: rootDomain,
-		TaskID: req.TaskID,
-	})
+	var ipStr string // first valid IP, used for the subdomain row itself
+	if sideEffects {
+		// side effect 1: ensure root domain exists
+		_, _ = s.UpsertRootDomain(UpsertRootDomainReq{
+			Domain: rootDomain,
+			TaskID: req.TaskID,
+		})
+	}
 
 	// side effect 2: if A/AAAA record, upsert each IP + bind domain.
 	// RecordValue is []string; each element may itself be comma-separated (legacy).
-	var ipStr string // first valid IP, used for the subdomain row itself
-	if req.RecordType == "A" || req.RecordType == "AAAA" {
+	if sideEffects && (req.RecordType == "A" || req.RecordType == "AAAA") {
 		for _, rv := range req.RecordValue {
 			for _, part := range strings.Split(rv, ",") {
 				candidate := strings.TrimSpace(part)

@@ -670,7 +670,13 @@ func (s *Server) registerAssets(w http.ResponseWriter, r *http.Request) {
 				writeErr(w, http.StatusInternalServerError, err.Error())
 				return
 			}
-			created = append(created, createdAsset{id: id, typ: "root_domain", value: rule.Domain})
+			// 贴子域名时 UpsertRootDomain 会落到 subdomain 行，回报的类型必须跟着走，
+			// 否则调用方拿到的 type 和库里存的对不上。
+			assetType := "root_domain"
+			if rule.Kind == "subdomain" {
+				assetType = "subdomain"
+			}
+			created = append(created, createdAsset{id: id, typ: assetType, value: rule.Domain})
 		case "ip":
 			// ParseScopeInput 把裸 IP 归一成 /32 或 /128 的 CIDR；资产列里存的是
 			// 地址本身，不带掩码。

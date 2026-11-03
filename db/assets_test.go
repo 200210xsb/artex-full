@@ -518,7 +518,7 @@ func TestQueryByType(t *testing.T) {
 	d, av2, _ := testSetup(t)
 	defer d.Close()
 
-	id, err := av2.UpsertRootDomain(UpsertRootDomainReq{Domain: "querytest.example.net"})
+	id, err := av2.UpsertRootDomain(UpsertRootDomainReq{Domain: "querytest-root.net"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -649,7 +649,7 @@ func TestQueryByTaskPaging(t *testing.T) {
 	const n = 60
 	for i := 0; i < n; i++ {
 		id, err := av2.UpsertRootDomain(UpsertRootDomainReq{
-			Domain: fmt.Sprintf("paging-%02d.querybytask.test", i),
+			Domain: fmt.Sprintf("paging-%02d-querybytask.test", i),
 			TaskID: taskID,
 		})
 		if err != nil {
