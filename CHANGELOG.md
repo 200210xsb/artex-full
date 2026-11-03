@@ -2,6 +2,46 @@
 
 本项目的重要变更记录在此文件中，格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.3.24] - 2026-11-03
+
+### 授权范围：子域名不再被当成根域名，也不再被误判为越界
+
+#### 修复的问题
+
+- **贴 URL 建企业会把子域名存成根域名**：企业范围编辑器接受整段 URL，前端把
+  `https://www.example.com/path` 一律归成 `domain` 并原样保留主机名，写入端也没有按
+  eTLD+1 归一。于是 `company_scope.domain` 里躺着 `www.example.com`，
+  `expandTaskCompanyScope` 又硬编码 `kind='root_domain'` 把它抄进 `task_scope`——
+  这条记录声称自己授权的是根域，实际存的是子域。授权闸门 `TaskRootDomainAllowed`
+  拿 agent 上报的根域 `example.com` 去和它比，后缀方向反了，一律判不命中。
+  **线上 455 条域名规则里 312 条（68.6%）属于这种情形，被合法声明的目标全部被拒。**
+- **新增 `subdomain` 范围档位**：`company_scope` 与 `task_scope` 都支持 `kind='subdomain'`，
+  `domain` 列存操作员真正贴的那个主机名。
+  - `ParseScopeLine` 按 eTLD+1 拆档：根域落 `domain`，其余落 `subdomain`，`Raw` 保留原始输入备审计。
+  - `ParseScopeInput` 允许调用方声明 `domain` 却贴子域名，按实际粒度落库，不再提升成根域。
+  - 任务创建展开、手工加范围、注册资产三条写入路径都保留原始粒度。
+  - 归属重算与 `resolveCompanyWithICP` 增加「范围值以 `.<上报根域>` 结尾」的匹配，
+    最具体的规则优先。
+  - 闸门把两侧都归一到 eTLD+1 再比较，声明 `www.example.com` 的子域范围因此能覆盖
+    agent 上报的根域 `example.com`；未声明的根域仍然被拒（范围只读语义不变）。
+- **`assets.root_domain` 与 `domain` 分开**：`domain` 保留上报的原始主机名（一台主机一行，
+  `uq_av2_root_domain` 唯一），`root_domain` 写入其 eTLD+1。此前两列绑同一个值，
+  归一化会把一个根域下的所有主机塌成一行。
+- **前端实时预览分「根域名 / 子域名」**：内置两段式公共后缀表用于输入时标注，
+  真正切分仍以服务端完整公共后缀表为准，预览标签不准也不会写错库。
+  带端口的（`http://1.2.3.4:8080/x`、`1.2.3.4:8080`）一律落 IP，端口不进范围。
+
+#### 存量数据
+
+- 317 条 `company_scope` 子域名规则改标 `subdomain`、290 条 `task_scope` 改标、
+  6 条与既有 `subdomain` 重复的行合并、308 条资产的 `root_domain` 列补正。
+  全部为原地改标，不删任何规则。
+
+#### 升级注意
+
+- `company_scope.kind` 与载荷约束放宽到包含 `subdomain`，`schema.sql` 启动时自动应用；
+  `idx_sv2_domain` 重建为覆盖 `('domain','subdomain')`。
+
 ## [0.3.22] - 2026-11-03
 
 ### WebPath：站点路径枚举 MCP

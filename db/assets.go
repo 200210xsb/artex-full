@@ -360,12 +360,23 @@ func (s *AssetStore) UpsertRootDomain(req UpsertRootDomainReq) (int64, error) {
 	if domain == "" {
 		return 0, fmt.Errorf("domain is required")
 	}
+	// domain keeps exactly what the caller reported (one row per host), while
+	// root_domain carries its registrable root. The two must not be conflated:
+	// uq_av2_root_domain is unique on domain, so normalizing domain here would
+	// collapse every host under one root into a single row and lose the host
+	// inventory. root_domain is the column attribution joins on
+	// (companies.go: a.root_domain = cs.domain) and company_scope stores roots,
+	// so it is the one that has to be normalized.
+	root, _ := RootDomain(domain)
+	if root == "" {
+		root = domain
+	}
 	if s.tx == nil {
 		return s.withCompanyScopeMutation(func(scoped *AssetStore) (int64, error) {
 			return scoped.UpsertRootDomain(req)
 		})
 	}
-	companyID, companySource, err := s.resolveCompanyForTask(req.TaskID, domain, "", req.ICP)
+	companyID, companySource, err := s.resolveCompanyForTask(req.TaskID, root, "", req.ICP)
 	if err != nil {
 		return 0, err
 	}
@@ -385,7 +396,7 @@ func (s *AssetStore) UpsertRootDomain(req UpsertRootDomainReq) (int64, error) {
 	var id int64
 	err = s.tx.QueryRow(`
 INSERT INTO assets(type, domain, root_domain, icp, company_id, company_source, task_ids)
-VALUES ('root_domain', $1, $1, $2, $3, $5, $4::bigint[])
+VALUES ('root_domain', $1, $6, $2, $3, $5, $4::bigint[])
 ON CONFLICT (domain) WHERE type = 'root_domain' DO UPDATE SET
     icp        = COALESCE(EXCLUDED.icp, assets.icp),
     company_id = CASE
@@ -397,10 +408,11 @@ ON CONFLICT (domain) WHERE type = 'root_domain' DO UPDATE SET
         WHEN EXCLUDED.company_id IS NOT NULL THEN EXCLUDED.company_source
         ELSE assets.company_source
     END,
+    root_domain = EXCLUDED.root_domain,
     task_ids   = (SELECT ARRAY(SELECT DISTINCT unnest(assets.task_ids || EXCLUDED.task_ids))),
     extra      = assets.extra || EXCLUDED.extra,
     last_seen  = now()
-RETURNING id`, domain, icpVal, companyID, taskIDs, companySourceOrDefault(companySource)).Scan(&id)
+RETURNING id`, domain, icpVal, companyID, taskIDs, companySourceOrDefault(companySource), root).Scan(&id)
 	return id, err
 }
 

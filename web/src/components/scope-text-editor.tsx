@@ -9,7 +9,8 @@ import type { ParsedCompanyScopeText } from "@/lib/company-scope";
 import type { CompanyScopeKind } from "@/lib/types";
 
 const SCOPE_KIND_LABELS: Record<CompanyScopeKind, string> = {
-  domain: "域名",
+  domain: "根域名",
+  subdomain: "子域名",
   ip: "IP",
   cidr: "CIDR",
   icp: "ICP",
@@ -22,7 +23,7 @@ export function ScopeTextEditor({
   onValueChange,
   parsed,
   label = "资产范围",
-  description = "每行一条，自动识别域名、IP、CIDR、ICP 备案和企业关键词。",
+  description = "每行一条，自动识别根域名、子域名、IP（带端口也可）、CIDR、ICP 备案和企业关键词。",
 }: {
   id: string;
   value: string;

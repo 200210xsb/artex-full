@@ -311,20 +311,71 @@ WHERE task_id=$1 AND kind IN ('root_domain','subdomain','ip','cidr','icp','compa
 	// sometimes a subdomain (www.example.com), and a subdomain of a declared root
 	// belongs to that root. Public-suffix reduction is unreliable for internal or
 	// non-delegated names, so compare the explicit dotted suffix instead.
-	if err := s.db.QueryRow(`
-SELECT EXISTS (
-           SELECT 1 FROM task_scope ts
-           WHERE ts.task_id=$1 AND ts.kind='root_domain'
-             AND (ts.domain=$2 OR right($2, length(ts.domain)+1) = '.' || ts.domain)
-       ) OR EXISTS (
-           SELECT 1 FROM task_scope ts
-           JOIN company_scope cs ON cs.company_id=ts.company_id AND cs.kind='domain'
-           WHERE ts.task_id=$1 AND ts.kind='company' AND ts.source='manual'
-             AND (cs.domain=$2 OR right($2, length(cs.domain)+1) = '.' || cs.domain)
-       )`, taskID, root).Scan(&allowed); err != nil {
+	//
+	// Both sides are reduced to their registrable root (eTLD+1) first. The scope
+	// side used to be compared verbatim, so a scope row holding the operator's raw
+	// host ("www.example.com") never matched the root the agent reports
+	// ("example.com") — the suffix test ran in the wrong direction and every
+	// asset under a legitimately declared root was rejected as out of scope.
+	// eTLD+1 reduction cannot be done in SQL, so the candidate scope values are
+	// read out and compared here.
+	rows, err := s.db.Query(`
+SELECT ts.domain FROM task_scope ts
+ WHERE ts.task_id=$1 AND ts.kind IN ('root_domain','subdomain') AND ts.domain IS NOT NULL
+UNION
+SELECT cs.domain FROM task_scope ts
+ JOIN company_scope cs ON cs.company_id=ts.company_id AND cs.kind IN ('domain','subdomain')
+ WHERE ts.task_id=$1 AND ts.kind='company' AND ts.source='manual'
+   AND cs.domain IS NOT NULL`, taskID)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var scopeDomain string
+		if err := rows.Scan(&scopeDomain); err != nil {
+			return false, err
+		}
+		if scopeAllowsRoot(scopeDomain, root) {
+			allowed = true
+			break
+		}
+	}
+	if err := rows.Err(); err != nil {
 		return false, err
 	}
 	return allowed, nil
+}
+
+// scopeAllowsRoot reports whether a root domain reported by an agent falls under
+// one scope domain value.
+//
+// Both sides are reduced to their registrable root, because a scope value may
+// hold the operator's raw host ("www.example.com") while the agent reports the
+// root ("example.com") — comparing them verbatim fails in the wrong direction.
+// After reduction the two must be equal; the dotted-suffix test additionally
+// covers hosts whose public suffix cannot be classified (internal names,
+// non-delegated TLDs), where reduction returns the host unchanged.
+func scopeAllowsRoot(scopeDomain, reportedRoot string) bool {
+	scopeRoot := DomainKey(scopeDomain)
+	reported := DomainKey(reportedRoot)
+	if scopeRoot == "" || reported == "" {
+		return false
+	}
+	if r, _ := RootDomain(scopeRoot); r != "" {
+		scopeRoot = r
+	}
+	if r, _ := RootDomain(reported); r != "" {
+		reported = r
+	}
+	if scopeRoot == reported {
+		return true
+	}
+	// reported is a subdomain of scopeRoot ("a.example.com" under "example.com").
+	if len(scopeRoot) < len(reported) && reported[len(reported)-len(scopeRoot)-1:] == "."+scopeRoot {
+		return true
+	}
+	return false
 }
 
 // DeleteTaskScope removes a single scope row by id, scoped to the given task.

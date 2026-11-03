@@ -108,10 +108,10 @@ ORDER BY kind, domain, net::text`, task.ID)
 			t.Errorf("expanded row kind=%s source=%q want manual", row.Kind, row.Source)
 		}
 		switch row.Kind {
-		case "root_domain":
+		case "root_domain", "subdomain":
 			domains[row.Domain]++
 			if row.Net != "" || row.Value != "" {
-				t.Errorf("root_domain row carries net/value: %+v", row)
+				t.Errorf("domain row carries net/value: %+v", row)
 			}
 		case "ip":
 			if row.Net != "10.20.30.40/32" {

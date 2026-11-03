@@ -13,7 +13,7 @@ export type ParsedCompanyScopeText = {
   errors: Array<{ line: number; error: string }>;
 };
 
-export const COMPANY_SCOPE_KINDS = new Set<CompanyScopeKind>(["domain", "ip", "cidr", "icp", "keyword"]);
+export const COMPANY_SCOPE_KINDS = new Set<CompanyScopeKind>(["domain", "subdomain", "ip", "cidr", "icp", "keyword"]);
 
 export function isCompanyScopeKind(value: unknown): value is CompanyScopeKind {
   return typeof value === "string" && COMPANY_SCOPE_KINDS.has(value as CompanyScopeKind);
@@ -94,13 +94,40 @@ function domainHostname(value: string): string | null {
   }
 }
 
+// 两段式公共后缀，只用来给输入时的实时预览标注「根域名 / 子域名」。真正的
+// eTLD+1 切分在服务端用完整公共后缀表做，提交时以服务端结果为准，所以这里
+// 覆盖不准也只会让预览标签偏一下，不会写错库。
+const MULTI_LABEL_SUFFIXES = new Set([
+  "com.cn", "net.cn", "org.cn", "gov.cn", "edu.cn", "ac.cn", "mil.cn",
+  "com.hk", "net.hk", "org.hk", "gov.hk", "edu.hk",
+  "com.tw", "net.tw", "org.tw", "gov.tw", "edu.tw",
+  "com.mo", "net.mo", "org.mo", "gov.mo", "edu.mo",
+  "com.my", "net.my", "org.my", "gov.my", "edu.my",
+  "com.sg", "net.sg", "org.sg", "gov.sg", "edu.sg",
+  "com.au", "net.au", "org.au", "gov.au", "edu.au",
+  "co.uk", "org.uk", "gov.uk", "ac.uk", "me.uk", "net.uk",
+  "co.jp", "ne.jp", "or.jp", "go.jp", "ac.jp",
+  "co.kr", "or.kr", "ne.kr", "go.kr", "re.kr",
+  "co.nz", "co.za", "co.in", "com.br", "com.mx", "com.tr", "com.ar", "com.ru",
+]);
+
+// registrableHost 返回主机名的 eTLD+1：www.example.com -> example.com。
+function registrableHost(hostname: string): string {
+  const labels = hostname.split(".").filter(Boolean);
+  if (labels.length <= 2) return hostname;
+  if (MULTI_LABEL_SUFFIXES.has(labels.slice(-2).join("."))) {
+    return labels.length >= 4 ? labels.slice(-3).join(".") : hostname;
+  }
+  return labels.slice(-2).join(".");
+}
+
 export function companyScopeRuleError(rule: CompanyScopeRule): string {
   const value = rule.value.trim();
   if (!value) return "请填写范围值";
   if (Array.from(value).length > MAX_COMPANY_SCOPE_VALUE_LENGTH) {
     return `最多 ${MAX_COMPANY_SCOPE_VALUE_LENGTH} 个字符`;
   }
-  if (rule.kind === "domain") {
+  if (rule.kind === "domain" || rule.kind === "subdomain") {
     if (/\s/.test(value)) return "请输入不含空格的有效域名或 URL";
     const hostname = domainHostname(value);
     if (!hostname || ipVersion(hostname) !== null) return "请输入有效域名或 URL";
@@ -160,9 +187,12 @@ export function classifyCompanyScopeLine(
 
   const looksLikeDomain = value.includes("://") || (!/\s/.test(value) && value.includes("."));
   if (looksLikeDomain) {
+    // 带端口的一律落 IP：http://1.2.3.4:8080/x 和 1.2.3.4:8080 都取主机地址。
     const hostname = domainHostname(value);
     if (hostname && ipVersion(hostname) !== null) return { line, rule: { kind: "ip", value: hostname } };
-    const rule: CompanyScopeRule = { kind: "domain", value };
+    // 贴进来的子域名保持子域名身份，不要当根域名存：根域名会被当成"整个域都授权"。
+    const kind: CompanyScopeKind = hostname && registrableHost(hostname) !== hostname ? "subdomain" : "domain";
+    const rule: CompanyScopeRule = { kind, value };
     const error = companyScopeRuleError(rule);
     return error ? { line, error } : { line, rule };
   }
@@ -197,7 +227,7 @@ export function parseCompanyScopeText(
 
 export function normalizeCompanyScopeValue(rule: CompanyScopeRule): string {
   const value = rule.value.trim();
-  if (rule.kind === "domain") return domainHostname(value) ?? value.toLowerCase();
+  if (rule.kind === "domain" || rule.kind === "subdomain") return domainHostname(value) ?? value.toLowerCase();
   if (rule.kind === "icp") return value.toLowerCase().replace(/\s/gu, "");
   if (rule.kind === "keyword") return value.toLowerCase().split(/\s+/u).filter(Boolean).join(" ");
   return value.toLowerCase();

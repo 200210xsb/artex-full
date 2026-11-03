@@ -364,7 +364,7 @@ export interface TaskScopeRow {
   reason?: string;
 }
 
-export type CompanyScopeKind = "domain" | "ip" | "cidr" | "icp" | "keyword";
+export type CompanyScopeKind = "domain" | "subdomain" | "ip" | "cidr" | "icp" | "keyword";
 
 // 新增企业时提交的结构化资产范围规则。
 export interface CompanyScopeRule {

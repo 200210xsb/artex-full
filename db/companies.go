@@ -136,7 +136,7 @@ func materializeCompanyScopeAssets(tx *sql.Tx, s *CompanyStore, companyID int64)
 	rows, err := tx.Query(`
 SELECT kind, COALESCE(domain,''), COALESCE(net::text,'')
 FROM company_scope
-WHERE company_id=$1 AND kind IN ('domain','ip')
+WHERE company_id=$1 AND kind IN ('domain','subdomain','ip')
 ORDER BY id
 LIMIT $2`, companyID, maxMaterializedScopeAssets)
 	if err != nil {
@@ -162,7 +162,7 @@ LIMIT $2`, companyID, maxMaterializedScopeAssets)
 	materialized := 0
 	for _, t := range targets {
 		switch t.kind {
-		case "domain":
+		case "domain", "subdomain":
 			if t.domain == "" {
 				continue
 			}
@@ -589,12 +589,12 @@ func insertScopeRulesTx(tx *sql.Tx, companyID int64, rules []ParsedScope, reason
 func insertScopeRuleTx(tx *sql.Tx, companyID int64, rule ParsedScope, reason string) (inserted bool, err error) {
 	var res interface{ RowsAffected() (int64, error) }
 	switch rule.Kind {
-	case "domain":
+	case "domain", "subdomain":
 		res, err = tx.Exec(`
 INSERT INTO company_scope(company_id, kind, domain, raw, reason)
-VALUES ($1, 'domain', $2, $3, $4)
+VALUES ($1, $2, $3, $4, $5)
 ON CONFLICT ON CONSTRAINT uq_sv2_domain DO NOTHING`,
-			companyID, rule.Domain, rule.Raw, reason)
+			companyID, rule.Kind, rule.Domain, rule.Raw, reason)
 	case "ip", "cidr":
 		res, err = tx.Exec(`
 INSERT INTO company_scope(company_id, kind, net, raw, reason)
@@ -656,7 +656,9 @@ WHERE company_source = 'scope'`); err != nil {
 WITH matched AS (
     SELECT DISTINCT ON (a.id) a.id AS asset_id, cs.company_id
     FROM assets a
-    JOIN company_scope cs ON cs.kind = 'domain' AND a.root_domain = cs.domain
+    JOIN company_scope cs ON cs.kind IN ('domain','subdomain')
+      AND (a.root_domain = cs.domain
+           OR right(cs.domain, length(a.root_domain) + 1) = '.' || a.root_domain)
     WHERE a.company_id IS NULL
       AND a.type IN ('root_domain','subdomain','service','endpoint')
       AND a.root_domain IS NOT NULL
@@ -870,8 +872,8 @@ func resolveCompanyWithICP(q companyScopeQueryer, rootDomain, ipStr, icp string)
 		var cid int64
 		err := q.QueryRow(`
 SELECT company_id FROM company_scope
-WHERE kind = 'domain'
-  AND domain = $1
+WHERE kind IN ('domain','subdomain')
+  AND (domain = $1 OR right(domain, length($1) + 1) = '.' || $1)
 ORDER BY length(domain) DESC, company_id
 LIMIT 1`, rootDomain).Scan(&cid)
 		if err == nil {

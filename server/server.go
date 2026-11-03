@@ -1853,7 +1853,7 @@ func (s *Server) firstCompanyScopeDomain(companyIDs []int64) (string, bool) {
 			continue
 		}
 		for _, rule := range scope {
-			if rule.Kind != "domain" {
+			if rule.Kind != "domain" && rule.Kind != "subdomain" {
 				continue
 			}
 			host := strings.ToLower(strings.TrimSpace(rule.Domain))

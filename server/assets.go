@@ -662,7 +662,7 @@ func (s *Server) registerAssets(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		switch rule.Kind {
-		case "domain":
+		case "domain", "subdomain":
 			id, err := as.UpsertRootDomain(db.UpsertRootDomainReq{Domain: rule.Domain})
 			if err != nil {
 				// 存储失败不是本次输入的问题，不伪装成 invalid：此时前面的资产

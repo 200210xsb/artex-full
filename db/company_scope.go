@@ -14,11 +14,16 @@ import (
 // ParsedScope is one parsed asset-scope entry. Its kind selects Domain, Net, or Value.
 // Used internally by the company scope parsers and CompanyStore.
 type ParsedScope struct {
-	Kind   string // "domain" | "ip" | "cidr" | "icp" | "keyword"
-	Domain string // normalized registrable/root domain (kind=domain)
-	Net    string // normalized CIDR, single IP as /32 or /128 (kind=ip|cidr)
-	Value  string // normalized text (kind=icp|keyword)
-	Raw    string // original input line
+	Kind   string // "domain" | "subdomain" | "ip" | "cidr" | "icp" | "keyword"
+	Domain string // kind=domain: registrable root; kind=subdomain: the exact host
+	// Subdomain is the exact host the operator typed when it was a subdomain
+	// (e.g. "www.example.com"); empty when the input already was the root.
+	// Kept so the scope can name the specific host the operator meant without
+	// losing the root the authorization is actually keyed on.
+	Subdomain string
+	Net       string // normalized CIDR, single IP as /32 or /128 (kind=ip|cidr)
+	Value     string // normalized text (kind=icp|keyword)
+	Raw       string // original input line
 }
 
 // ScopeInput is the structured API form for a company scope rule. Empty Kind
@@ -95,10 +100,16 @@ func ParseScopeInput(input ScopeInput) (ParsedScope, error) {
 		return ParseAutoScopeLine(raw)
 	}
 	switch kind {
-	case "domain", "ip", "cidr":
+	case "domain", "subdomain", "ip", "cidr":
 		rule, err := ParseScopeLine(raw)
 		if err != nil {
 			return rule, err
+		}
+		// 域名和子域名是同族的两档粒度。调用方声明 domain 却贴了子域名时按实际
+		// 粒度落库（subdomain），绝不能把子域名当根域名存下来——那会把授权范围
+		// 悄悄扩大到操作员从未声明过的兄弟主机。
+		if (kind == "domain" || kind == "subdomain") && (rule.Kind == "domain" || rule.Kind == "subdomain") {
+			return rule, nil
 		}
 		if rule.Kind != kind {
 			return ParsedScope{Kind: kind, Raw: raw}, fmt.Errorf("%q 不是有效的 %s 范围", raw, kind)
@@ -267,6 +278,22 @@ func ParseScopeLine(line string) (ParsedScope, error) {
 	if suf, icann := publicsuffix.PublicSuffix(d); icann && suf == d {
 		return r, fmt.Errorf("不能用裸 TLD 作为范围: %s", raw)
 	}
-	r.Kind, r.Domain = "domain", d
+	// Split the root from the subdomain. Operators paste URLs, so
+	// "www.example.com" arrives here as often as "example.com", and the two
+	// must not be stored the same way. Raw keeps the original input for audit.
+	root, isApex := RootDomain(d)
+	if root == "" {
+		root = d
+	}
+	if isApex {
+		r.Kind, r.Domain = "domain", root
+		return r, nil
+	}
+	// A pasted subdomain stays a subdomain: promoting it to its parent root
+	// would widen the authorization to every sibling host the operator never
+	// named, and collapsing it loses what was actually declared. Consumers
+	// widen to the root only where they must compare against an agent-reported
+	// root domain, and they do it through RootDomain, so both agree there.
+	r.Kind, r.Domain, r.Subdomain = "subdomain", d, d
 	return r, nil
 }

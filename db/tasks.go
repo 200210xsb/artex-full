@@ -386,7 +386,7 @@ SELECT scope.company_id, company.name, scope.kind,
 FROM company_scope scope
 JOIN companies company ON company.id=scope.company_id
 WHERE scope.company_id=ANY($1::bigint[])
-  AND scope.kind IN ('domain','ip','cidr','icp')
+  AND scope.kind IN ('domain','subdomain','ip','cidr','icp')
 ORDER BY scope.company_id, scope.id
 LIMIT $2`, companyIDs, taskCompanyScopeRowCap)
 	if err != nil {
@@ -422,11 +422,20 @@ LIMIT $2`, companyIDs, taskCompanyScopeRowCap)
 		reason := "任务创建时关联企业范围：" + rule.companyName
 		var execErr error
 		switch rule.kind {
-		case "domain":
+		case "domain", "subdomain":
+			// Copy the rule at the granularity the operator declared: a root
+			// stays kind='root_domain', a subdomain stays kind='subdomain'.
+			// Hardcoding 'root_domain' for a subdomain value made the row lie
+			// about what it authorizes, and the authorization gate then rejected
+			// every asset under the host the operator had actually named.
+			scopeKind := "root_domain"
+			if rule.kind == "subdomain" {
+				scopeKind = "subdomain"
+			}
 			_, execErr = tx.Exec(`
 INSERT INTO task_scope(task_id, kind, domain, company_id, source, reason)
-VALUES ($1, 'root_domain', $2, $3, 'manual', $4)
-ON CONFLICT DO NOTHING`, taskID, rule.domain, rule.companyID, reason)
+VALUES ($1, $2, $3, $4, 'manual', $5)
+ON CONFLICT DO NOTHING`, taskID, scopeKind, rule.domain, rule.companyID, reason)
 		case "ip":
 			_, execErr = tx.Exec(`
 INSERT INTO task_scope(task_id, kind, net, company_id, source, reason)

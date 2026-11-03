@@ -14,7 +14,7 @@ func TestParseScopeLine(t *testing.T) {
 		wantErr bool
 	}{
 		{"example.com", "domain", false},
-		{"https://sub.example.com/path", "domain", false},
+		{"https://sub.example.com/path", "subdomain", false},
 		{"1.2.3.4", "ip", false},
 		{"10.0.0.0/8", "", true}, // over-broad IPv4 (< /16)
 		{"198.51.100.0/24", "cidr", false},
@@ -49,7 +49,7 @@ func TestParseAutoScopeLine(t *testing.T) {
 		wantErr    bool
 	}{
 		{name: "domain", input: "example.com", kind: "domain", normalized: "example.com"},
-		{name: "url", input: "https://sub.example.com/path", kind: "domain", normalized: "sub.example.com"},
+		{name: "url", input: "https://sub.example.com/path", kind: "subdomain", normalized: "sub.example.com"},
 		{name: "url query", input: "https://example.com/path?source=x", kind: "domain", normalized: "example.com"},
 		{name: "url credentials", input: "https://user:pass@example.com/path", kind: "domain", normalized: "example.com"},
 		{name: "url ip", input: "http://203.0.113.10/path", kind: "ip", normalized: "203.0.113.10/32"},
@@ -58,7 +58,7 @@ func TestParseAutoScopeLine(t *testing.T) {
 		{name: "cidr", input: "198.51.100.0/24", kind: "cidr", normalized: "198.51.100.0/24"},
 		{name: "icp latin", input: "京 ICP备 123号", kind: "icp", normalized: "京icp备123号"},
 		{name: "icp chinese", input: "沪网备案 9988", kind: "icp", normalized: "沪网备案9988"},
-		{name: "icp domain", input: "icp.example.com", kind: "domain", normalized: "icp.example.com"},
+		{name: "icp domain", input: "icp.example.com", kind: "subdomain", normalized: "icp.example.com"},
 		{name: "icp url query", input: "https://example.com/path?icp=1", kind: "domain", normalized: "example.com"},
 		// 备案号不含点号：掺了域名/版本号的描述性文字归关键词，否则会存成一条
 		// 永远匹配不上的死 ICP 规则。
@@ -92,7 +92,7 @@ func TestParseAutoScopeLine(t *testing.T) {
 				t.Fatalf("kind=%q want %q", rule.Kind, tc.kind)
 			}
 			got := rule.Value
-			if rule.Kind == "domain" {
+			if rule.Kind == "domain" || rule.Kind == "subdomain" {
 				got = rule.Domain
 			} else if rule.Kind == "ip" || rule.Kind == "cidr" {
 				got = rule.Net

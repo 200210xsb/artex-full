@@ -178,8 +178,11 @@ func (s *AssetStore) RegisterTaskAssetScopes(taskID int64, inputs []ScopeInput) 
 		}
 		var assetID int64
 		switch rule.Kind {
-		case "domain":
+		case "domain", "subdomain":
 			taskScope.Kind = "root_domain"
+			if rule.Kind == "subdomain" {
+				taskScope.Kind = "subdomain"
+			}
 			taskScope.Domain = rule.Domain
 			var alreadyLinked bool
 			err := tx.QueryRow(`SELECT id, $2=ANY(task_ids) FROM assets WHERE type='root_domain' AND domain=$1`, rule.Domain, taskID).
