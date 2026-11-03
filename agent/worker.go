@@ -264,7 +264,8 @@ func workerTrafficBlock(recording bool) string {
 	return "\n\n**流量工具**：\n- traffic_search / traffic_get / traffic_blob：回看响应、找已访问过的资源，**先查流量、不要重复 curl 同一 URL**。traffic_search **必须指定 host**、默认只回 3 条极轻量索引(id/method/url/status/resp_len，无响应内容)，需要更多显式调大 limit；可用 body_contains 在请求/响应正文里做全文搜索(至少 3 字符，支持子串和中文，如找密码/密钥/报错/内网地址)；要看某条原文用 traffic_get(id)，其中超大正文显示为 @blob sha256:<hash>，用 traffic_blob(hash) 分段取全文。" +
 		"\n\n**出口与录制（硬性要求）**：HTTP(S)_PROXY 与录制 CA 已注入命令环境，curl / requests / go / node 等默认就走录制代理。**不要绕过它**——不要 `--noproxy '*'`、不要 `proxies={}`、不要 `trust_env=False`、不要 `unset http_proxy`。绕开代理的请求不进流量库，这个漏洞就没有流量证据可绑定，交付时缺一整块证据。" +
 		"\n- 录制代理对**能直连的目标是直连出网**（只有直连不通的才经全局出口），走代理不会比直连慢，**不存在为了提速而绕开代理的理由**。" +
-		"\n- 代理导致 TLS/连通报错时，先查 CA 是否被信任（curl 用注入的 `--cacert` / `CURL_CA_BUNDLE`，requests 用 `REQUESTS_CA_BUNDLE`）；排查方向是修代理链路，**不是关掉代理**。"
+		"\n- 代理导致 TLS/连通报错时，先查 CA 是否被信任（curl 用注入的 `--cacert` / `CURL_CA_BUNDLE`，requests 用 `REQUESTS_CA_BUNDLE`）；排查方向是修代理链路，**不是关掉代理**。" +
+		"\n\n**读全局态势，别只盯着自己那条意图**：启动消息里的【全局探索态势】里有规划者落图的批次计划与 hints（当前该做哪一批、哪些站点排在后面、你这条在全盘里的位置、哪些是禁测项）。它是可降级的——被压缩掉了就自己调 list_assets / list_facts / node_detail 补。**别拿到意图就闷头冲**：如果自己这条的前置还没人做、或者批次计划里根本没这个站点，就按实情回报（前置未满足 / 不在当前批次），别硬推出一个半截结论。"
 }
 
 // artifactSpec is 段 [C]: the code-owned, non-editable tail appended to every
