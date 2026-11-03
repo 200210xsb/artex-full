@@ -1547,6 +1547,32 @@ type createTaskReq struct {
 	AgentKey *string `json:"agent_key,omitempty"`
 }
 
+// autoRouteAgent scans the task description and goal for keywords and returns
+// the best-matching specialized agent key. Empty = no match (use default
+// planner/worker, which now carries the four-step thinking + finding guard in
+// code-owned rules). Only routes to specialized domain agents (miniprogram/
+// mobile) — general web pentest and 攻防 are handled by the default
+// planner/worker flow, like the original ARTEX.
+func autoRouteAgent(description, goal string) string {
+	t := strings.ToLower(description + " " + goal)
+	switch {
+	case containsAny(t, "小程序", "miniprogram", "wxapkg", "微信小程序"):
+		return "miniprogram"
+	case containsAny(t, "移动端", "android", "ios", "apk", "app测试", "移动应用"):
+		return "mobile"
+	}
+	return ""
+}
+
+func containsAny(s string, subs ...string) bool {
+	for _, sub := range subs {
+		if strings.Contains(s, sub) {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 	var req createTaskReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -1602,6 +1628,16 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeErr(w, 400, err.Error())
 		return
+	}
+	// 用户没指定 agent 时，扫描述+目标的关键词自动路由到合适的专项 agent。
+	// 匹配不到就走默认 planner/worker（和原来一样）。autoRoute 返回的 key
+	// 也要校验存在且启用，不存在就静默回退到默认，不让用户因为关键词误匹配而报错。
+	if agentKey == "" {
+		if routed := autoRouteAgent(req.Description, req.Goal); routed != "" {
+			if _, _, err := s.m.pg.ResolveTaskAgent(routed); err == nil {
+				agentKey = routed
+			}
+		}
 	}
 	t, err := s.m.CreateTaskWithOptions(req.Description, req.Goal, db.TaskCreateOptions{
 		Name: strings.TrimSpace(req.Name), CategoryID: req.CategoryID,
