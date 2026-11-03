@@ -1549,10 +1549,9 @@ type createTaskReq struct {
 
 // autoRouteAgent scans the task description and goal for keywords and returns
 // the best-matching specialized agent key. Empty = no match (use default
-// planner/worker, which now carries the four-step thinking + finding guard in
-// code-owned rules). Only routes to specialized domain agents (miniprogram/
-// mobile) — general web pentest and 攻防 are handled by the default
-// planner/worker flow, like the original ARTEX.
+// planner/worker). Lets users create a task without manually picking an agent.
+// Order matters: specific patterns (小程序/移动端) checked before the generic
+// 渗透 catch-all.
 func autoRouteAgent(description, goal string) string {
 	t := strings.ToLower(description + " " + goal)
 	switch {
@@ -1560,6 +1559,8 @@ func autoRouteAgent(description, goal string) string {
 		return "miniprogram"
 	case containsAny(t, "移动端", "android", "ios", "apk", "app测试", "移动应用"):
 		return "mobile"
+	case containsAny(t, "渗透测试", "渗透", "src", "漏洞挖掘", "安全测试", "web渗透", "授权测试"):
+		return "pentest"
 	}
 	return ""
 }
