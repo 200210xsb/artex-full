@@ -275,6 +275,18 @@ func artifactSpec(dir string) string {
 	return "\n\n**中间产物输出规约**：脚本、payload、抓到的响应体、临时数据等一切中间产物，**一律写到本任务工作目录 " + dir + "**（相对路径即写在这里，也可用该绝对路径）——**不要写 /tmp、不要用其它绝对路径**。"
 }
 
+// workerFindingGuard is 段 [D]: code-owned, non-editable finding-quality rules
+// appended to every worker prompt. Moved here from the solo-agent prompts so
+// all tasks get the same quality guardrails regardless of agent selection.
+func workerFindingGuard() string {
+	return "\n\n**对抗式自检（发现漏洞时必做）**：每当觉得\"发现漏洞了/成功了\"，先用与首次【不同的路径或独立命令】再触发一次来证实——不是复述原来的证据。警惕自欺：把\"版本号/CVE 命中\"当漏洞、把\"参数看起来可注入\"当已利用、用与结论等价的假设循环当证据。自检没过就标 inferred，别当铁案。" +
+		"\n\n**上报门槛（别刷垃圾，也别漏真洞）**：" +
+		"\n- 该报：XSS（有真实渲染执行证据）、盲 SSRF（有带外回连或证明可达内网/元数据）、盲注（有可复现的时间/布尔/带外侧信道）、组合拳（必须写清 A 的产出如何让 B 成立、每步证据、最终影响，链条没跑通不算）。" +
+		"\n- 不报：版本号/指纹泄露、缺安全响应头、目录列表、robots.txt 等静态泄露、纯信息提示类；没有实质影响的未授权访问（匿名能打开但只返回公开信息、健康检查、空列表、字典清单）；未授权的低价值信息泄露（内部字段名/表名、组件版本、报错堆栈、公开配置，拿不到凭据/密钥/用户数据也当不了后续利用前置）；只能自己粘给自己、无用户交互路径的自测 XSS；毫无回连证据的\"疑似 SSRF\"；既无回显也无侧信道的盲注猜测；仅凭 CVE/补丁对比推断的问题。" +
+		"\n- 未授权类判定：拿到敏感数据（用户/业务/凭据密钥）或能产生写/越权操作 → 报；只是能打开、内容没价值 → 不报；能当链条前置 → 按组合拳报。拿不准标存疑，不发 finding；定级只保留高危/严重。" +
+		"\n\n**封锁路线不无理由重试**：确认走不通的方向标记封锁；只有出现材料性新机理（新发现/新入口/新参数/明显不同的构造）才重开，且说清\"这次和上次不同在哪\"。换措辞、\"再试一次\"不算，禁止空转。"
+}
+
 // workerArtifactSpec is the worker's 段 [C]: its per-intent run dir is pre-created
 // by the engine (ensureRunDir), so it just writes relative paths there — no manual
 // mkdir, no cross-worker name collisions.
@@ -305,7 +317,7 @@ func workerSystem(proxyAddr, caCert, dataDir, runDir string) string {
 	// the traffic_* tools are registered — so it gates the traffic-tool note.
 	// Optional finding guidance is added for every role after tool resolution.
 	// 资产收集规则是代码拥有的（不随 DB 提示词被改掉）：worker 是真正调 MCP 的人。
-	return body + workerTrafficBlock(caCert != "") + assetCollectionPrompts("") + workerArtifactSpec(runDir)
+	return body + workerTrafficBlock(caCert != "") + assetCollectionPrompts("") + workerFindingGuard() + workerArtifactSpec(runDir)
 }
 
 // renderIntentTask formats the claimed intent for the worker's launch USER message:
