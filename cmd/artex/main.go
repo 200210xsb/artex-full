@@ -113,6 +113,12 @@ func run() int {
 	}
 	log.Printf("[config] skill 目录: %s", skillDir)
 	srv := server.New(ctx, mgr, skillDir, *dataDir, config.BaseDir())
+
+	// 边车是子进程，进程一重启就没了，而库里还记着上次选中的节点。不接回来的话，
+	// 每次重启（尤其是「一键更新」自己触发的那次）都会静默失去代理。放后台跑，
+	// 起不来也只影响代理，不该拖住服务启动。
+	go srv.ResumeSidecar()
+
 	httpSrv := &http.Server{
 		Addr:              *addr,
 		Handler:           srv.Handler(),

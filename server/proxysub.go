@@ -1621,6 +1621,52 @@ func (s *Server) pgProxyStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.proxyStatus(pg))
 }
 
+// ResumeSidecar 在服务启动后恢复上次选中的代理节点。
+//
+// 选中的节点名持久化在库里，但 sing-box 边车是子进程：进程一退，127.0.0.1:7890
+// 就没人监听了。此前只有「手动点选节点」这一个入口会拉起边车，于是每次重启——
+// 尤其是一键更新完成后的那次重启——都会变成「库里选着节点、实际没有代理」：
+// 检查更新、LLM 调用、子域名收集一起报 connection refused，而页面上的状态看着
+// 一切正常（选中项还在）。用户只能靠重新点一次节点救回来。
+//
+// 这里只做恢复，不改动选中值；拉不起来只记日志，绝不影响服务启动。
+func (s *Server) ResumeSidecar() {
+	// 数据库可能还在建连（管理数据源是异步接上的），给它一点时间。
+	var pg *db.DB
+	for i := 0; i < 30; i++ {
+		if pg = s.m.pg; pg != nil {
+			break
+		}
+		time.Sleep(2 * time.Second)
+	}
+	if pg == nil {
+		log.Printf("[proxy] 启动恢复跳过：数据库未就绪")
+		return
+	}
+	name, err := proxySelectedName(pg)
+	if err != nil {
+		log.Printf("[proxy] 启动恢复跳过：读选中节点失败: %v", err)
+		return
+	}
+	if name == "" {
+		return // 从没选过节点，正常的初始状态
+	}
+	sc := s.proxySidecar()
+	if sc.Status().Running {
+		return // 已经有一份在跑，别重复拉
+	}
+	node, err := findProxyNode(pg, name)
+	if err != nil {
+		log.Printf("[proxy] 启动恢复失败：找不到上次选中的节点 %q: %v", name, err)
+		return
+	}
+	if err := sc.StartSidecar(*node); err != nil {
+		log.Printf("[proxy] 启动恢复失败：节点 %q 拉起边车出错: %v", name, err)
+		return
+	}
+	log.Printf("[proxy] 已恢复上次选中的节点 %q，出口 %s", name, sc.Status().Egress)
+}
+
 // proxyStatus 组装状态返回：边车运行态 + 当前出口 + 上次错误 + 选择与统计。
 func (s *Server) proxyStatus(pg *db.DB) ProxyStatus {
 	status := ProxyStatus{ProxySidecarStatus: s.proxySidecar().Status()}
