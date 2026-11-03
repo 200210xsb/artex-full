@@ -39,6 +39,16 @@ const (
 	// egressFailTTL 缓存「直连不可行」。可能只是瞬时抖动（线路切换、临时丢包），
 	// 所以比成功短，网络恢复后能自动回到直连而不必重启。
 	egressFailTTL = 3 * time.Minute
+	// egressProbeConcurrency 限同一时刻在飞探测数的上限。
+	//
+	// 这一条是拿事故换来的：录制代理的 upstream 回调在**每个连接**上同步跑，
+	// 爬虫类流量（枚举 chunk 文件名那种）会在几秒内造出成百上千个新地址，每个
+	// 都发起一次 TCP 探测。没有上限时探测扇出比排空快得多，连接与 goroutine
+	// 在机器上堆积，RAM 3.6G / 2 核的小机器直接被拖死到 ssh 都进不去。
+	egressProbeConcurrency = 8
+	// egressProbeQueueWait 是排队等探测槽位的上限。等不到就按直连放行——此时
+	// 宁可赌一把直连（国内目标九成能通），也不能让请求卡在这里把队列越堆越长。
+	egressProbeQueueWait = 2 * time.Second
 )
 
 // egressRules 是运营者显式指定的分流后缀（小写、无前导点，如 "ys7.com"）。
@@ -177,18 +187,48 @@ func (t *Traffic) probeDirect(addr string) bool {
 	entry, _ := t.probes.LoadOrStore(addr, &dialProbe{})
 	p := entry.(*dialProbe)
 
+	// 探测是唯一会对目标多打一个 SYN 的动作，也是唯一会占住调用方 goroutine
+	// 的动作（upstream 回调是同步的）。用信号量把扇出按住：队列排不上就放行直连，
+	// 不让请求陪着一起等。信号量要在地址锁之前拿——否则同地址的请求会攥着锁
+	// 排队等一个根本轮不到自己的槽位，把这条地址彻底堵死。
+	if t.probeSem != nil {
+		select {
+		case t.probeSem <- struct{}{}:
+			defer func() { <-t.probeSem }()
+		case <-time.After(egressProbeQueueWait):
+			return true
+		}
+	}
+
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if !p.exp.IsZero() && time.Now().Before(p.exp) {
 		return p.ok
 	}
 
+	// 拨号带硬超时。ctx 只能打断「已经排上号的连接」，拦不住域名解析本身——
+	// cgo resolver 的 DNS 查询不受 ctx 控制，所以这里额外用 goroutine 包一层，
+	// 保证解析卡在哪，调用方都能在超时后走人，不至于把请求线程一起拖住。
 	ctx, cancel := context.WithTimeout(context.Background(), egressProbeTimeout)
 	defer cancel()
-	conn, err := (&net.Dialer{}).DialContext(ctx, "tcp", addr)
-	ok := err == nil
-	if ok {
-		conn.Close()
+	type dialResult struct {
+		conn net.Conn
+		err  error
+	}
+	ch := make(chan dialResult, 1)
+	go func() {
+		c, err := (&net.Dialer{}).DialContext(ctx, "tcp", addr)
+		ch <- dialResult{c, err}
+	}()
+	var res dialResult
+	select {
+	case res = <-ch:
+	case <-ctx.Done():
+		res = dialResult{err: ctx.Err()}
+	}
+	ok := res.err == nil
+	if ok && res.conn != nil {
+		res.conn.Close()
 	}
 	p.ok = ok
 	if ok {

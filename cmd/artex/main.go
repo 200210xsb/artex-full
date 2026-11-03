@@ -13,6 +13,9 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"runtime/debug"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -50,6 +53,51 @@ func main() {
 	os.Exit(run())
 }
 
+// applyMemoryLimit sets Go's soft memory limit so the collector starts
+// reclaiming before the cgroup ceiling is reached.
+//
+// Default: 60% of physical RAM. That sits below systemd's MemoryMax on the
+// production host (2.4G of 3.6G), leaving room for the traffic proxy's own
+// buffers and for child processes. ARTEX_MEM_LIMIT (bytes) overrides it.
+func applyMemoryLimit() {
+	limit := int64(0)
+	if v := strings.TrimSpace(os.Getenv("ARTEX_MEM_LIMIT")); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+			limit = n
+		}
+	} else if total := physMemTotal(); total > 0 {
+		limit = total * 3 / 5
+	}
+	if limit <= 0 {
+		return
+	}
+	debug.SetMemoryLimit(limit)
+	log.Printf("[mem] Go 软内存限值 %d MiB（cgroup 硬上限触发会 OOM 杀进程并拖垮整机）", limit>>20)
+}
+
+// physMemTotal reads MemTotal from /proc/meminfo. Returns 0 when unknown.
+func physMemTotal() int64 {
+	b, err := os.ReadFile("/proc/meminfo")
+	if err != nil {
+		return 0
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		if !strings.HasPrefix(line, "MemTotal:") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			return 0
+		}
+		kb, err := strconv.ParseInt(fields[1], 10, 64)
+		if err != nil {
+			return 0
+		}
+		return kb * 1024
+	}
+	return 0
+}
+
 func run() int {
 	var (
 		addr    = flag.String("addr", ":8787", "HTTP listen address")
@@ -61,6 +109,14 @@ func run() int {
 	// hand the build version to the server package so GET /api/health can report it
 	// to the frontend top bar.
 	server.BuildVersion = version
+
+	// Soft memory limit. The service runs under a systemd MemoryMax (2.4G on the
+	// production host), and a hard cgroup OOM kill takes the whole box with it:
+	// the process stops, the host stops forking, and even sshd stops handing out
+	// banners — that is what made the platform unreachable on 2026-11-03. A soft
+	// limit makes the GC work harder well before the hard ceiling, so a traffic
+	// burst costs some recorded evidence instead of the entire machine.
+	applyMemoryLimit()
 
 	printBanner(*addr)
 
