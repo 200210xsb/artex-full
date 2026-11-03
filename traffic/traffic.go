@@ -37,6 +37,18 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+const (
+	// recQueueTimeout is how long a request may wait for the recorder before
+	// its exchange is dropped (and counted) instead of queued. Short on
+	// purpose: the waiters already hold their buffered bodies, so the queue is
+	// a memory liability, not just a latency one.
+	recQueueTimeout = 500 * time.Millisecond
+	// maxInflight caps how many requests may be MITM'd (and therefore buffered
+	// in memory) at the same time. Beyond it, requests are tunneled: they still
+	// reach the target, they just are not recorded.
+	maxInflight = 32
+)
+
 const indexSchema = `
 CREATE TABLE IF NOT EXISTS exchanges (
   id           TEXT PRIMARY KEY,
@@ -176,6 +188,29 @@ type Traffic struct {
 	// probes caches dial verdicts so the per-request split costs one TCP
 	// handshake per address at most, not one per request.
 	probes sync.Map // addr(string) -> *dialProbe
+	// probeSem bounds how many direct-dial probes may be in flight at once.
+	// Crawlers that enumerate thousands of URLs create many new addresses in
+	// quick succession; without a cap the probe fan-out piles up faster than it
+	// drains and eats the machine alive.
+	probeSem chan struct{}
+	// recDropped counts exchanges that were NOT recorded because the recorder
+	// could not keep up (or memory was tight). Surfaced in logs so a missing
+	// piece of evidence is explainable instead of mysterious.
+	recDropped atomic.Int64
+	// memMu guards the sampled memory reading used by memPressure.
+	memMu sync.Mutex
+	// memAt is when the RSS was last sampled; memHigh is the verdict.
+	memAt   time.Time
+	memHigh bool
+	// memLimit is the RSS ceiling (bytes) above which recording is skipped.
+	memLimit int64
+	// recSem gates how many requests may wait for the recorder at once. The
+	// queue it forms is what used to grow without bound.
+	recSem chan struct{}
+	// inflight counts requests currently being MITM'd (i.e. whose bodies are
+	// buffered in memory). Bounded so a burst cannot buffer hundreds of
+	// bodies at once.
+	inflight atomic.Int64
 }
 
 // Open initializes the traffic tree, blob store and SQLite index under dir.
@@ -201,7 +236,7 @@ func Open(dir, addr string) (*Traffic, error) {
 	if err != nil {
 		return nil, err
 	}
-	t := &Traffic{dir: dir, addr: addr, db: db, closed: make(chan struct{})}
+	t := &Traffic{dir: dir, addr: addr, db: db, closed: make(chan struct{}), probeSem: make(chan struct{}, egressProbeConcurrency), memLimit: defaultMemLimit(), recSem: make(chan struct{}, 1)}
 	if err := t.initIndex(); err != nil {
 		db.Close()
 		return nil, err
@@ -240,9 +275,31 @@ func Open(dir, addr string) (*Traffic, error) {
 	// Fail-open: MITM every host by default, EXCEPT ones a prior request proved we
 	// can't intercept without breaking (see maybePassthrough). Those are tunneled
 	// transparently so the request still reaches the target instead of being killed.
+	//
+	// The same fail-open applies under memory pressure: a tunneled request is
+	// not recorded, but it is also never buffered, so it costs no memory. This
+	// is the decision that must happen BEFORE the body is read — by the time
+	// record() runs, the request and response bodies are already in memory.
+	// Deciding here is what keeps a burst of concurrent requests from pushing
+	// the process past its cgroup ceiling (and, with it, the whole host).
 	p.SetShouldInterceptRule(func(req *http.Request) bool {
-		_, tunnel := t.pass.Load(hostOnly(req.Host))
-		return !tunnel
+		if _, tunnel := t.pass.Load(hostOnly(req.Host)); tunnel {
+			return false
+		}
+		if t.memPressure() {
+			return false
+		}
+		if t.inflight.Add(1) > maxInflight {
+			t.inflight.Add(-1)
+			// A slot that is never released means a flow ended without a
+			// callback; a budget that slowly leaks would silently stop all
+			// recording, so give it back once it is clearly out of sync.
+			if t.inflight.Load() > maxInflight*10 {
+				t.inflight.Store(0)
+			}
+			return false
+		}
+		return true
 	})
 	p.AddAddon(&sink{t: t})
 	t.proxy = p
@@ -408,6 +465,7 @@ type sink struct {
 }
 
 func (s *sink) Response(f *mproxy.Flow) {
+	s.t.doneInflight()
 	if f.Request == nil || f.Response == nil {
 		return
 	}
@@ -418,7 +476,21 @@ func (s *sink) Response(f *mproxy.Flow) {
 // the failure looks proxy/protocol-caused (h2 quirks, HEAD-with-body, protocol
 // errors) — not a plain target-unreachable error — we flag the host for
 // transparent passthrough so future requests to it succeed instead of dying.
-func (s *sink) RequestError(f *mproxy.Flow, err error) { s.t.maybePassthrough(f, err) }
+func (s *sink) RequestError(f *mproxy.Flow, err error) {
+	s.t.doneInflight()
+	s.t.maybePassthrough(f, err)
+}
+
+// doneInflight releases one slot of the in-flight budget. A flow that ends
+// without either callback (client vanished mid-body) would leak a slot, so the
+// counter is clamped — and reset outright once it is obviously out of sync,
+// because a leaked budget means "record nothing", which is worse than a
+// momentary over-admission.
+func (t *Traffic) doneInflight() {
+	if n := t.inflight.Add(-1); n < 0 {
+		t.inflight.Store(0)
+	}
+}
 
 // maybePassthrough marks a host to be tunneled transparently on the next
 // connection, but only for errors the proxy itself caused — a target that is
@@ -454,8 +526,36 @@ func proxyCausedErr(err error) bool {
 func (t *Traffic) record(f *mproxy.Flow) {
 	// The write lock covers blob + index writes, so DeleteHost (and its blob GC)
 	// can run under the same lock without racing a concurrent record.
+	//
+	// Recording is serialized on purpose (one SQLite write transaction at a
+	// time), so its throughput has a ceiling. When requests arrive faster than
+	// that ceiling — a crawler enumerating thousands of URLs does exactly that —
+	// an unbounded queue is what kills the process: every waiting connection
+	// still holds its own fully buffered request/response bodies, and the
+	// backlog grows until the process hits its cgroup memory ceiling and stops
+	// making progress. That is how the whole host went unresponsive on
+	// 2026-11-03 (artex's cgroup caps memory at 2.4G; the queue pushed it over,
+	// and a host that cannot fork also cannot hand out an ssh banner).
+	//
+	// So the queue is bounded, not eliminated: a request waits a little for the
+	// recorder, and only one that waits too long is dropped (and counted).
+	// Bounded wait keeps normal bursts complete while a sustained flood can
+	// never grow the backlog without limit.
+	select {
+	case t.recSem <- struct{}{}:
+		defer func() { <-t.recSem }()
+	case <-time.After(recQueueTimeout):
+		t.dropRecord()
+		return
+	}
 	t.wmu.Lock()
 	defer t.wmu.Unlock()
+	// Same reasoning for memory: under pressure, prefer dropping evidence over
+	// being OOM-killed.
+	if t.memPressure() {
+		t.dropRecord()
+		return
+	}
 	host := f.Request.URL.Hostname()
 	method := f.Request.Method
 	tmpl := db.TemplatePath(f.Request.URL.EscapedPath())
@@ -526,6 +626,67 @@ VALUES(?,?,?,?,?,?,?)`,
 		log.Printf("[traffic] 记录 %s 失败（提交）：%v", url, err)
 	}
 }
+
+// defaultMemLimit 是录制器放弃录制前的进程 RSS 上限。默认 800M：artex 的
+// cgroup 内存上限是 2.4G，抓包缓冲、SQLite、LLM 客户端与子进程还要用掉不少，
+// 留出足够余量。可用环境变量 ARTEX_TRAFFIC_MEM_LIMIT 覆盖（字节）。
+func defaultMemLimit() int64 {
+	if v := strings.TrimSpace(os.Getenv("ARTEX_TRAFFIC_MEM_LIMIT")); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+			return n
+		}
+	}
+	return 800 << 20
+}
+
+// memPressure 报告进程内存是否已逼近上限。采样频率 1 秒一次——RSS 读的是
+// /proc/self/statm，够便宜，但没必要每个请求都读一遍。
+func (t *Traffic) memPressure() bool {
+	t.memMu.Lock()
+	defer t.memMu.Unlock()
+	now := time.Now()
+	if now.Sub(t.memAt) < time.Second {
+		return t.memHigh
+	}
+	t.memAt = now
+	limit := t.memLimit
+	if limit <= 0 {
+		limit = defaultMemLimit()
+	}
+	t.memHigh = processRSS() > limit
+	return t.memHigh
+}
+
+// processRSS 返回本进程当前常驻内存（字节）。读不到时返回 0（视为无压力）。
+func processRSS() int64 {
+	b, err := os.ReadFile("/proc/self/statm")
+	if err != nil {
+		return 0
+	}
+	fields := strings.Fields(string(b))
+	if len(fields) < 2 {
+		return 0
+	}
+	pages, err := strconv.ParseInt(fields[1], 10, 64)
+	if err != nil {
+		return 0
+	}
+	return pages * int64(os.Getpagesize())
+}
+
+// dropRecord 记一次「没能录下来」，并定期把累计数打进日志——证据缺失必须
+// 能被解释，否则用户只会看到「流量证据 0 条」却查不出原因。
+func (t *Traffic) dropRecord() {
+	n := t.recDropped.Add(1)
+	if n%500 == 1 {
+		log.Printf("[traffic] 录制跟不上或内存吃紧，已丢弃 %d 条流量（RSS %d MiB / 上限 %d MiB）；"+
+			"这是背保护，机器比证据重要",
+			n, processRSS()>>20, t.memLimit>>20)
+	}
+}
+
+// Dropped 返回因录制跟不上或内存吃紧而丢弃的流量条数。
+func (t *Traffic) Dropped() int64 { return t.recDropped.Load() }
 
 // storedBody is one body after the inline/spill decision: inline is what goes in
 // the SQLite column (the whole body, or a preview when spilled), hash names the
