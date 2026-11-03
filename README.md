@@ -54,6 +54,10 @@ AI 自主渗透测试系统（Go 后端 + Next.js 前端）
 > 依赖数据库 **PostgreSQL**（Docker 方案自带给容器，本地编译需自备 16+）；探索需配置 **LLM**（`ANTHROPIC_API_KEY` 或 `OPENAI_API_KEY`，也可在 UI 里配）。
 >
 > 国内网络提示：Docker 首次构建要拉 `node:20` / `golang:1.26` / `python:3.12` 三个基础镜像，拉不动请先给 Docker 配镜像加速器（`/etc/docker/daemon.json` 的 `registry-mirrors`）；`npm` 与 Go 模块已在 Dockerfile 里默认走国内源。
+>
+> **Docker 首次构建的资源要求**：前端静态导出 + Go 静态编译 + Playwright 装 chromium 会同时跑在容器里，
+> 内存建议 **≥ 4 GB**（3.6 GB 的小机器实测会被拖死），磁盘预留 8 GB 左右。
+> 机器吃不消就走**方式四（下载预编译包）**，解压即用，不需要构建。
 
 ### 方式一：一键安装脚本（推荐）
 
