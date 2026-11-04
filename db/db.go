@@ -281,10 +281,58 @@ ON CONFLICT (name) DO NOTHING`,
 	if err := d.seedDefaultInterceptRulesV3(); err != nil {
 		return fmt.Errorf("seed intercept rules v3: %w", err)
 	}
+	if err := d.seedDefaultInterceptRulesV4(); err != nil {
+		return fmt.Errorf("seed intercept rules v4: %w", err)
+	}
 	if err := d.seedDefaultAssetInterceptRules(); err != nil {
 		return fmt.Errorf("seed asset intercept rules: %w", err)
 	}
 	return nil
+}
+
+// seedDefaultInterceptRulesV4 fixes the v1 "[内置] 删除系统关键目录" rule, which
+// used to deny every `rm` of any absolute path.
+//
+// The v1 pattern was
+//
+//	\brm\b[^"'\n]{0,60}["'\s](/|/etc|/bin|/usr|/boot|/var|/lib|/sys|/proc|/dev|/sbin|/root)
+//
+// whose first alternative is a bare "/" — so `rm -f /tmp/foo.log` matched just as
+// well as `rm -rf /etc`. In practice that blocked agents from cleaning up their own
+// scratch files under /opt/artex/data (e.g. brute-force logs), which is routine and
+// harmless work.
+//
+// The corrected pattern matches only real system directories, at a path boundary, so
+// /etc, /etc/passwd and /etc/ssh are denied while /etcetera and /variable are not.
+// The bare "/" alternative is gone: `rm -rf /` is already covered by the V2 rule
+// "[内置] 破坏性系统命令" (?i)\b(rm\s+-rf\s+/|...), so nothing is lost.
+//
+// /opt/artex/data needs no explicit allow-list: it is not one of the system
+// directories, so it simply does not match. The intercept engine matches by regex
+// only and has no exception mechanism.
+//
+// Exported as a package const so the pattern is unit-testable without a DB.
+const deleteSystemDirPattern = `(?i)\brm\b[^"'\n]{0,80}["'\s](/(?:etc|bin|sbin|usr|boot|lib|lib64|var|sys|proc|dev|root)(?:["'\s/]|$))`
+
+// seedDefaultInterceptRulesV4 rewrites the misfiring v1 rule in place. Editing the
+// v1 seed would have no effect on databases that already ran it, hence a separate
+// versioned migration (own flag, so it also lands on DBs that already ran v1-v3).
+func (d *DB) seedDefaultInterceptRulesV4() error {
+	if v, _, _ := d.GetSetting("intercept_default_rules_v4"); v == "done" {
+		return nil
+	}
+	const name = "[内置] 删除系统关键目录"
+	if _, err := d.Exec(`
+UPDATE intercept_rules
+SET pattern = $2, message = $3
+WHERE name = $1`,
+		name,
+		deleteSystemDirPattern,
+		"禁止删除系统关键目录（/etc /bin /usr /boot /lib /var /sys /proc /dev /root 等）",
+	); err != nil {
+		return fmt.Errorf("rule %q: %w", name, err)
+	}
+	return d.SetSetting("intercept_default_rules_v4", "done")
 }
 
 // seedDefaultAssetInterceptRules inserts the built-in asset blocklist (fuzzy
