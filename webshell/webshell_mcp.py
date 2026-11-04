@@ -64,6 +64,14 @@ DATA_DIR = "/opt/artex/data"
 STORE_PATH = DATA_DIR + "/webshells.json"
 LOG_PATH = "/var/log/webshell-mcp.log"
 
+# 人工授权闸：agent 侧 shell_del 要删目标上的远端文件时，除了 remove_remote=true
+# 还必须带 human_approved=true。页面（WebShell 功能页）里人工点的删除走 Go 侧
+# API，不经过这里，不受影响。
+# 环境变量 ARTEX_WEBSHELL_ALLOW_REMOTE_DELETE=1 可以整条关掉这道闸（默认开闸）。
+ALLOW_REMOTE_DELETE = os.environ.get("ARTEX_WEBSHELL_ALLOW_REMOTE_DELETE", "1").strip() not in (
+    "", "0", "off", "false", "no"
+)
+
 VALID_TYPES = ("php", "php_raw", "jsp", "aspx")
 
 # 内置 payload 库：<根目录>/<type>/<file>，payload_get 只允许访问这下面
@@ -488,17 +496,75 @@ def proxy_pool(raw):
 
 
 def proxy_of(sess):
-    """取这条会话该用的代理串：会话配置优先，其次全局环境变量。"""
-    p = (sess.get("proxy") or "").strip()
-    return p or (os.environ.get(PROXY_ENV) or "").strip()
+    """取这条会话该用的出口。
+
+    默认跟随平台代理：代理订阅里选中的节点由 sing-box 边车暴露在 127.0.0.1:7890，
+    换节点时出口 IP 自动跟着变，不用改会话配置。边车没起就直连。
+    会话可以显式指定别的代理（可给一串做池），或填 direct 强制直连。
+    """
+    raw = (sess.get("proxy") or "").strip()
+    if raw.lower() in ("direct", "off", "none", "直连"):
+        return ""
+    if raw:
+        return raw
+    return platform_proxy() or (os.environ.get(PROXY_ENV) or "").strip()
 
 
-def pick_proxy(raw):
-    """从代理池里随机挑一个（用 secrets，不按时间可猜）。"""
+# 平台代理边车（代理订阅里选的节点）固定监听的 mixed 端口。这个地址不变，
+# 变的是背后的节点与出口 IP，所以不用跟着节点改配置。
+PLATFORM_PROXY_ADDR = "127.0.0.1:7890"
+_PLAT_CACHE = ("", 0.0)
+_PLAT_LOCK = threading.Lock()
+
+
+def platform_proxy():
+    """平台代理在跑就返回其出口地址，否则返回空（直连）。
+
+    用端口探测而不是查状态：边车进程还在但端口不通时照样发不出请求。
+    结果缓存几秒，免得每个请求都连一次。
+    """
+    env = (os.environ.get("ARTEX_PLATFORM_PROXY") or "").strip()
+    if env:
+        if env.lower() in ("off", "direct", "none", "0"):
+            return ""
+        return env
+    global _PLAT_CACHE
+    now = time.time()
+    with _PLAT_LOCK:
+        val, at = _PLAT_CACHE
+        if now - at < 5:
+            return val
+    val = ""
+    addr = (os.environ.get("ARTEX_PLATFORM_PROXY_ADDR") or PLATFORM_PROXY_ADDR).strip()
+    host, _, port = addr.rpartition(":")
+    try:
+        s = socket.create_connection((host or "127.0.0.1", int(port)), timeout=0.3)
+        s.close()
+        val = "socks5://" + addr
+    except (OSError, ValueError):
+        val = ""
+    with _PLAT_LOCK:
+        _PLAT_CACHE = (val, now)
+    return val
+
+
+def pick_proxy(raw, session_key="", rotate=False):
+    """从代理池里挑一个。
+
+    默认按会话稳定选（同一会话始终同一出口）：出口 IP 是会变的，如果一个马
+    的请求老是换来源 IP，目标侧反而更容易注意到「同一个马被多个 IP 轮流访问」。
+    只有显式 rotate=True（会话字段 proxy_rotate）才每次随机——那是拿来对冲
+    「单个出口被封」的场景，不是默认。
+    """
     pool = proxy_pool(raw)
     if not pool:
         return ""
-    return pool[0] if len(pool) == 1 else secrets.choice(pool)
+    if len(pool) == 1:
+        return pool[0]
+    if rotate or not session_key:
+        return secrets.choice(pool)
+    h = hashlib.sha256(("p:" + session_key).encode("utf-8")).digest()
+    return pool[int.from_bytes(h[:4], "big") % len(pool)]
 
 
 def redact_proxy(raw):
@@ -521,6 +587,8 @@ def redact_proxy(raw):
 
 def validate_proxy(raw):
     """校验代理串格式；写错的配置在 shell_add 时就挡住。"""
+    if (raw or "").strip().lower() in ("", "direct", "off", "none", "直连"):
+        return
     for p in proxy_pool(raw):
         try:
             u = urllib.parse.urlsplit(p)
@@ -533,25 +601,37 @@ def validate_proxy(raw):
 
 
 def egress_label(sess):
-    """给用户看的实际出口描述。"""
+    """给用户看的实际出口描述：平台代理 / 显式代理（含池）/ 直连。"""
     p = proxy_of(sess)
+    explicit = (sess.get("proxy") or "").strip()
     if not p:
-        return "直连"
-    if not (sess.get("proxy") or "").strip():
-        return "全局代理 " + redact_proxy(p)
-    return redact_proxy(p)
+        return "直连（会话强制）" if explicit else "直连（未起平台代理，目标能看到平台 IP）"
+    pool = proxy_pool(p)
+    picked = pick_proxy(p, (sess.get("url") or "").strip(), bool(sess.get("proxy_rotate")))
+    label = redact_proxy(picked) if len(pool) > 1 else redact_proxy(p)
+    if len(pool) > 1:
+        label += "（%d 个池，%s）" % (len(pool), "每请求轮换" if sess.get("proxy_rotate") else "本会话固定")
+    if not explicit:
+        if p == "socks5://" + PLATFORM_PROXY_ADDR and not os.environ.get("ARTEX_PLATFORM_PROXY"):
+            return "平台代理（随订阅节点变化）"
+        return "平台代理 " + label
+    return label
 
 
 _OPENER_CACHE = {}
 
 
-def _opener_for(proxy_raw):
-    """按代理串造（并缓存）一个 opener。
+def _opener_for(sess):
+    """按会话的出口配置造（并缓存）一个 opener。
 
     socks5/socks5h 走 PySocks，且一律远端解析域名（rdns），免得本地 DNS 把
     目标域名露给运营商；http/https 走 urllib 自带的 ProxyHandler。
+
+    池的选择用会话 URL 当稳定键：同一会话永远同一出口，除非显式开了
+    proxy_rotate。原因见 pick_proxy 的注释。
     """
-    key = pick_proxy(proxy_raw)
+    proxy_raw = proxy_of(sess)
+    key = pick_proxy(proxy_raw, (sess.get("url") or "").strip(), bool(sess.get("proxy_rotate")))
     if not key:
         return _OPENER, "直连"
     if key in _OPENER_CACHE:
@@ -616,7 +696,7 @@ def _post_payload(sess, payload, timeout, name=""):
         headers["Content-Type"] = "application/x-www-form-urlencoded"
         req = urllib.request.Request(url, data=qs.encode("utf-8"), headers=headers, method="POST")
 
-    opener, _egress = _opener_for(proxy_of(sess))
+    opener, _egress = _opener_for(sess)
     try:
         resp = opener.open(req, timeout=timeout)
         try:
@@ -925,6 +1005,7 @@ def tool_shell_add(args):
     user_agent = (opt_str(args, "user_agent", "") or "").strip()
     if len(user_agent) > 512:
         raise ToolError("user_agent 太长（上限 512 字符）")
+    proxy_rotate = bool(args.get("proxy_rotate") or False)
     remote_path = (opt_str(args, "remote_path", "") or "").strip()
     if remote_path and not re.match(r"^(/|[A-Za-z]:[\\/])", remote_path):
         raise ToolError("remote_path 应是绝对路径，如 /var/www/html/s.php 或 C:\\inetpub\\s.aspx，"
@@ -950,6 +1031,8 @@ def tool_shell_add(args):
             # 出口代理与 UA：空着就沿用旧配置（改个备注不该把出口清掉）
             "proxy": proxy or (prev.get("proxy") or ""),
             "user_agent": user_agent or (prev.get("user_agent") or ""),
+            # 默认不轮换：同一会话固定一个出口，换 IP 反而更显眼
+            "proxy_rotate": proxy_rotate if "proxy_rotate" in args else bool(prev.get("proxy_rotate")),
             "created_at": created,
         }
         if existed:
@@ -1424,6 +1507,18 @@ def tool_shell_del(args):
     remove_remote = bool(args.get("remove_remote") or False)
     force = bool(args.get("force") or False)
     explicit = (opt_str(args, "path", "") or "").strip()
+    # 人工授权闸：光传 remove_remote=true 不够，还要 human_approved=true。
+    # agent 常按旧计划正文（"验证后删马并核验 404"）自删远端，把口子堵在这里，
+    # 删不删远端就真的由人说了算。
+    human_approved = bool(args.get("human_approved") or False)
+    if remove_remote and ALLOW_REMOTE_DELETE and not human_approved:
+        raise ToolError(
+            "远端删除需要人工授权，已拒绝执行（远端文件未动，本机登记也保留）。\n"
+            "删不删目标上的文件由人决定，agent 不能自己清场。\n"
+            "如确实要清远端：人工在 WebShell 功能页删，或由操作人明确授权后\n"
+            "传 remove_remote=true 且 human_approved=true。\n"
+            "只想摘掉本机登记、不动目标：去掉 remove_remote 即可。"
+        )
 
     with _store_lock:
         store = _load_store()
@@ -1769,15 +1864,25 @@ TOOLS = [
                 "proxy": {
                     "type": "string",
                     "description": (
-                        "可选，这条会话的出口代理：socks5h://[user:pass@]host:port 或 "
-                        "http://[user:pass@]host:port。目标侧只会看到代理/节点 IP，"
-                        "看不到平台地址。也可以给逗号分隔的一串做池，每次请求随机挑一个。"
-                        "留空则用全局 ARTEX_WEBSHELL_PROXY，再空就直连"
+                        "可选，默认留空即可：留空＝跟随平台代理（代理订阅里选中的节点，"
+                        "经 sing-box 边车出 127.0.0.1:7890），换节点时出口 IP 自动跟着变。"
+                        "填 direct 强制直连；也可填显式代理 "
+                        "socks5h://[user:pass@]host:port 或 http://[user:pass@]host:port，"
+                        "或逗号分隔一串做池（配合 proxy_rotate 轮换）"
                     ),
                 },
                 "user_agent": {
                     "type": "string",
                     "description": "可选，覆盖默认 UA（默认是普通 Chrome UA，不带工具名）",
+                },
+                "proxy_rotate": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "给了一串代理时是否每次请求都换出口。默认 False：同一会话固定"
+                        "一个出口 IP（出口 IP 本身会变，一个马老换来源 IP 反而更显眼）。"
+                        "只有单个出口被封、需要换着用时才开"
+                    ),
                 },
             },
             "required": ["name", "url", "type"],
@@ -1787,6 +1892,7 @@ TOOLS = [
         "name": "shell_list",
         "description": (
             "列出已登记的全部 WebShell 会话（名称 / 类型 / URL / 请求方法 / 落地路径 / 出口 / 备注 / 创建时间）。"
+            "出口一栏会写明「平台代理（随订阅节点变化）」/ 显式代理 / 直连。"
             "出于安全，不返回参数名（password）与自定义 header 值，出口代理的账密打码。"
         ),
         "inputSchema": {"type": "object", "properties": {}},
@@ -1876,7 +1982,7 @@ TOOLS = [
         "name": "shell_del",
         "description": (
             "删除会话。默认只摘掉本机登记（/opt/artex/data/webshells.json），远端文件一概不动。"
-            "需要清痕迹时显式传 remove_remote=true，才会："
+            "需要清痕迹时显式传 remove_remote=true（另需人工授权位 human_approved=true），才会："
             "① 删远端的马文件（php/php_raw 用 PHP unlink 自删，jsp/aspx 用 rm -f / del）；"
             "② 删该会话 shell_upload 上传过的残留；③ 再请求一次 URL 复查确认打不通；④ 摘登记。"
             "远端没清干净时报错并保留登记（活着的马不能静默失联），确要丢弃登记传 force=true。"
@@ -1886,9 +1992,16 @@ TOOLS = [
             "type": "object",
             "properties": {
                 "name": {"type": "string", "description": "要删除的会话名"},
+                "human_approved": {
+                    "type": "boolean", "default": False,
+                    "description": (
+                        "人工授权位。remove_remote=true 且 human_approved=true 才会真删"
+                        "目标上的远端文件；授权只能由操作人给出，agent 不得自行置位。"
+                    ),
+                },
                 "remove_remote": {
                     "type": "boolean", "default": False,
-                    "description": "是否连远端文件一起删。默认 false=只摘本机登记；要清痕迹才显式传 true",
+                    "description": "是否连远端文件一起删。默认 false=只摘本机登记；要清痕迹才显式传 true（另需 human_approved）",
                 },
                 "path": {
                     "type": "string",
