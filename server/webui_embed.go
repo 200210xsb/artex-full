@@ -7,9 +7,7 @@ import (
 	"embed"
 	"io/fs"
 	"net/http"
-	"net/url"
 	"path"
-	"regexp"
 	"strings"
 )
 
@@ -110,34 +108,51 @@ func gzipStatic(next http.Handler) http.Handler {
 	})
 }
 
-// webuiAssetRefRE 匹配 HTML 里指向构建产物的绝对路径（js / css）。
-var webuiAssetRefRE = regexp.MustCompile(`/_next/static/[A-Za-z0-9._/-]+\.(?:js|css)`)
-
-// serveHTMLWithBuildTag 读 HTML，给静态资源引用补 ?v=<BuildVersion> 再返回。
+// webuiClearSiteDataOnce 控制是否在 HTML 响应上发 Clear-Site-Data: "cache"。
 //
-// 为什么需要：_next/static 的文件名不含内容哈希，同一个名字在两次构建之间内容会变。
-// 浏览器一旦按旧的 immutable 头缓存过（历史上确实是这么发的），光把响应头改掉不会
-// 让它重新拉取——只有 URL 变了才会。带上版本号相当于每次发布换一次资源地址，
-// 老缓存自动失效，用户不用手动强刷。
+// 为什么需要它：_next/static 的文件名不含内容哈希，同一个名字在两次构建之间内容
+// 会变。0.3.30 以前的响应头是 immutable（一年），浏览器一旦缓存过就一年不再回源；
+// 光把响应头改成 no-cache 对那批老缓存无效——它们根本不会来问。
+//
+// 为什么不用「给资源引用加 ?v=<版本>」这种老办法（0.3.30 就是这么干的）：
+// HTML 里的地址带了 ?v=，而 flight 载荷（RSC 文本）里引用的是**不带** ?v= 的地址。
+// 同一个 chunk 因此变成两个 URL、两份缓存，运行时按载荷里的地址去拿时，命中的是
+// 用户浏览器里那份老的 immutable 缓存——加载到的 chunk 和当前构建对不上，客户端
+// 路由的 transition 永远提交不了，表现就是侧边栏点了没反应、只能手输地址。
+// 线上 A/B 实测：去掉 ?v= 后点击立刻恢复正常。
+//
+// 现在改成：资源地址保持干净（不带版本号），_next/static 一律回源校验；
+// 再在 HTML 上发一次 Clear-Site-Data: "cache"，把浏览器里那份老的 immutable 缓存
+// 整个清掉。清完之后就是正常的「每次校验」行为，不再需要版本号。
+//
+// 这个开关发一个版本就够：下一次发版把它置回 false。
+var webuiClearSiteDataOnce = true
+
+// serveHTMLWithBuildTag 读 HTML 并返回。
+//
+// 注意这里**不再**给静态资源引用加 ?v=，原因见 webuiClearSiteDataVer 的说明：
+// 加了版本号会让 HTML 与 flight 载荷引用到两个不同的 chunk 地址，旧缓存混进来，
+// 客户端路由会点不动。资源新鲜度改由「_next/static 回源校验 + 一次性清缓存」保证。
 func serveHTMLWithBuildTag(w http.ResponseWriter, r *http.Request, fsys fs.FS, name string) bool {
 	data, err := fs.ReadFile(fsys, name)
 	if err != nil {
 		return false
 	}
-	ver := strings.TrimSpace(BuildVersion)
-	if ver == "" {
-		ver = "dev"
-	}
-	suffix := "?v=" + url.QueryEscape(ver)
-	out := webuiAssetRefRE.ReplaceAllFunc(data, func(m []byte) []byte {
-		if strings.Contains(string(m), "?") {
-			return m
-		}
-		return append(append([]byte{}, m...), []byte(suffix)...)
-	})
+	out := data
+	// 兜底：静态资源引用上不许再带 ?v=（带了就和 flight 载荷里的地址对不上，
+	// 旧 chunk 混进来，客户端路由会点不动）。见 webui_assets.go 的说明。
+	out = webuiStripAssetVersion(out)
+	// 用 http://用户:密码@host:port 打开时，凭据会留在 document.baseURI 里，把页面
+	// 内所有相对 URL 的 fetch 打死——Next 客户端路由点不动、登录 POST 报「无法连接
+	// 到后端服务」都是这一个原因。插一段探针让页面自己换回干净 URL。
+	out = webuiInjectBaseURIFix(out)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	// HTML 必须每次回源校验，否则新版本入口页本身也可能被缓存住。
 	w.Header().Set("Cache-Control", "no-cache, must-revalidate")
+	if webuiClearSiteDataOnce {
+		// 清掉浏览器里存了很久的 immutable 静态资源缓存，发一次即可。
+		w.Header().Set("Clear-Site-Data", `"cache"`)
+	}
 	_, _ = w.Write(out)
 	return true
 }

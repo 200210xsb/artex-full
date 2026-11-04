@@ -1449,6 +1449,8 @@ export const api = {
       header: input.header ?? "",
       note: input.note ?? "",
       remote_path: input.remote_path ?? "",
+      proxy: input.proxy ?? "",
+      user_agent: input.user_agent ?? "",
     }),
   // 删除会话。opts.remote=true 会先进远端清痕迹（删马文件 + 上传残留 + 复查），
   // 清不干净时后端回 409 并保留登记（除非再传 force）。

