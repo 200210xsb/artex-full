@@ -61,8 +61,10 @@ SERVER_NAME = "Webshell"
 SERVER_VERSION = "1.0.0"
 
 DATA_DIR = "/opt/artex/data"
-STORE_PATH = DATA_DIR + "/webshells.json"
-LOG_PATH = "/var/log/webshell-mcp.log"
+# 会话库与日志路径允许用环境变量覆盖：默认仍是生产路径，但端到端测试（起真 MCP
+# 进程走 JSON-RPC 调工具）需要指向临时库——直接用真库会动生产数据。
+STORE_PATH = (os.environ.get("ARTEX_WEBSHELL_STORE") or "").strip() or (DATA_DIR + "/webshells.json")
+LOG_PATH = (os.environ.get("ARTEX_WEBSHELL_LOG") or "").strip() or "/var/log/webshell-mcp.log"
 
 # 人工授权闸：agent 侧 shell_del 要删目标上的远端文件时，除了 remove_remote=true
 # 还必须带 human_approved=true。页面（WebShell 功能页）里人工点的删除走 Go 侧
