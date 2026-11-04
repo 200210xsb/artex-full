@@ -28,14 +28,33 @@ func wireAgentAugment(pg *db.DB, skillDir string, hostTools func() ([]actool.Cor
 		if err != nil || a == nil {
 			return nil, agent.DeferredInfo{}, nil
 		}
+		// 任务绑定的「专项 agent」只往提示词里追加一段指引，真正执行的角色仍然是
+		// worker/planner/main。但 MCP 可见性是按角色 key 查的，于是攻防 agent（redteam）
+		// 手里的 Webshell/Nuclei 永远装不到干活的那一端：目标写着「拿 shell」，worker
+		// 搜不到 shell_add，只能手工落马再当临时文件删掉，页面上一条会话都没有。
+		// 这里把绑定 agent 的可见性并进本次运行——只借工具，不换角色、不换提示词。
+		var bindAgentID int64
+		if ri := agent.RunInfoFrom(ctx); ri.TaskID != 0 {
+			if boundKey, kerr := pg.TaskAgentKeyForTask(ri.TaskID); kerr == nil && boundKey != "" && boundKey != agentKey {
+				if ba, berr := pg.GetAgentByKey(boundKey); berr == nil && ba != nil && ba.Enabled {
+					bindAgentID = ba.ID
+				}
+			}
+		}
 		var extra []actool.CoreTool
 
 		// --- skills: load visible skills into reg (used for the Skill meta-tool
 		// and to know which MCP servers are skill-gated). ---
 		var reg *skill.Registry
-		if names, _ := pg.AgentSkillNames(a.ID); len(names) > 0 {
-			nameSet := make(map[string]bool, len(names))
-			for _, n := range names {
+		skillNames, _ := pg.AgentSkillNames(a.ID)
+		if bindAgentID != 0 {
+			if boundNames, berr := pg.AgentSkillNames(bindAgentID); berr == nil && len(boundNames) > 0 {
+				skillNames = append(skillNames, boundNames...)
+			}
+		}
+		if len(skillNames) > 0 {
+			nameSet := make(map[string]bool, len(skillNames))
+			for _, n := range skillNames {
 				nameSet[n] = true
 			}
 			if allReg, err := skill.LoadDir(skillDir); err == nil && allReg != nil {
@@ -73,6 +92,13 @@ func wireAgentAugment(pg *db.DB, skillDir string, hostTools func() ([]actool.Cor
 		{
 			mcpIDs, _ := pg.AgentVisible(a.ID, "mcp")
 			want := idSet(mcpIDs)
+			if bindAgentID != 0 {
+				if boundIDs, berr := pg.AgentVisible(bindAgentID, "mcp"); berr == nil {
+					for _, id := range boundIDs {
+						want[id] = true
+					}
+				}
+			}
 			all, _ := pg.ListMCP()
 			for _, m := range all {
 				if !m.Enabled {

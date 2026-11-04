@@ -183,3 +183,24 @@ FROM agents WHERE key=$1`, normalized).Scan(&a.Key, &a.Name, &a.Description, &en
 	}
 	return &a, prompt, nil
 }
+
+// TaskAgentKeyForTask 返回任务绑定的专项 agent key（未绑定 => 空串）。
+//
+// 装配工具时要用它：任务的专项 agent 只负责「提示词附加」，真正执行的角色固定是
+// worker/planner/main，而 MCP 可见性是按角色 key 查的。不把这层转接补上，攻防
+// agent 手里的 Webshell/Nuclei 就永远到不了干活的那一端——目标要求「拿 shell」
+// 的任务只能在报告里写「工具不可用」，页面上一条会话都没有。
+func (d *DB) TaskAgentKeyForTask(taskID int64) (string, error) {
+	if taskID == 0 {
+		return "", nil
+	}
+	var key sql.NullString
+	err := d.QueryRow(`SELECT agent_key FROM tasks WHERE id=$1`, taskID).Scan(&key)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(key.String), nil
+}

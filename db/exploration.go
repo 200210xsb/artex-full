@@ -2019,3 +2019,29 @@ func (s *ExplorationStore) ActivityByIDsForTerminalIntents(ids []int64) ([]Activ
 func (s *ExplorationStore) AddStandaloneFinding(taskID, nodeID int64, vulnclass, name, severity, summary, evidence, worker string, assetIDs []int64) (int64, error) {
 	return s.db.AddFinding(taskID, nodeID, vulnclass, name, severity, summary, evidence, worker, assetIDs)
 }
+
+// WebshellToolUsage 统计本探索里真正调用过 Webshell MCP（shell_add / shell_exec）
+// 的次数。prove_goal 用它区分两种完全不同的结论：
+//   - 「命令能执行」：一次 DBGp eval / 模板注入回显就够，活动里没有任何 Webshell 调用；
+//   - 「shell 已落地」：必然有一次 shell_add 登记，活动里留得下痕迹。
+// 只有后者能满足「目标要求拿到 shell」。
+func (s *ExplorationStore) WebshellToolUsage() (int, error) {
+	if s == nil || s.db == nil {
+		return 0, nil
+	}
+	var n int
+	// 只认「真的调用了 Webshell 工具」的活动，不能全表 ILIKE：攻防任务的目标原文
+	// 本身就写着「用 mcp__Webshell__shell_add 登记」，任何 TodoWrite / fact 复述一遍
+	// 目标就会命中，等于白检。ExecuteExtraTool 的调用行 detail 里带完整入参
+	// （末尾是 "tool_name": "mcp__Webshell__xxx"），结果行不带，这个区分刚好够用。
+	err := s.db.QueryRow(`
+SELECT count(*) FROM activity
+WHERE exploration_id=$1
+  AND tool='ExecuteExtraTool'
+  AND (detail ~ 'mcp__Webshell__(shell_add|shell_exec|shell_upload)'
+       OR summary ~ 'mcp__Webshell__(shell_add|shell_exec|shell_upload)')`, s.expID).Scan(&n)
+	if err != nil {
+		return 0, err
+	}
+	return n, nil
+}

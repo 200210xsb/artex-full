@@ -1264,6 +1264,11 @@ func (t *ToolSet) proveGoal() actool.CoreTool {
 			if err != nil || evidenceNode == nil || (evidenceNode.Kind != db.KindFact && evidenceNode.Kind != db.KindFinding) {
 				return actool.Errorf("evidence_id 必须是本任务或直接关联任务的事实/漏洞节点"), nil
 			}
+			// 目标要的是「拿到 shell / 权限」，而证据只是一次命令回显、本任务从头到尾
+			// 没有登记过任何 shell 会话 —— 这不是达成，是把「能执行」记成了「已拿到」。
+			if msg := guardShellGoal(t.ts, goalNode, evidenceNode); msg != "" {
+				return actool.Errorf(msg), nil
+			}
 			_ = t.ts.Link(ev, db.RelProves, goal)
 			_ = t.ts.SetNodeState(goal, "met")
 			// 每标记一个目标 met，就检查本任务是否【所有目标】都已 met；若是，自动判定

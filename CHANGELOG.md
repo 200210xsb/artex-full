@@ -2,6 +2,38 @@
 
 本项目的重要变更记录在此文件中，格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.3.26] - 2026-11-04
+
+### 攻防任务：专项 agent 的工具装不到执行端，shell 只验证不落地
+
+#### 修复的问题
+
+- **任务绑定的专项 agent 只带提示词、不带工具**：`tasks.agent_key` 指向的 agent
+  （如 `redteam`）只把它的当前提示词追加给 planner/worker，而 MCP 可见性在
+  `wireAgentAugment` 里是按**执行角色**的 key（planner/worker/mainagent）去查
+  `agent_visibility` 的。`redteam` 明明可见 `Webshell`/`Nuclei`/`Burp`，真正干活的
+  `worker` 却一条都看不到——目标里写着「拿到 shell 就必须用 `shell_add` 登记」，
+  agent 在 `SearchExtraTools` 里搜不到这个工具，只能手工 `file_put_contents` 落一个
+  临时马，再当临时文件删掉收尾，WebShell 页面始终是空的。
+  现在装配时会把任务绑定 agent 的 MCP / 技能可见性并进本次运行（只借工具，不换角色、
+  不换提示词）；未绑定专项 agent 的任务行为不变。
+- **「能执行命令」被当成「拿到 shell」**：`prove_goal` 现在对目标文本含
+  shell/权限字样的目标做一次校验——本任务活动里没有任何 `mcp__Webshell__shell_add` /
+  `shell_exec` 调用，且证据里也没写「未取得 shell」，就拒绝标记 met，并把「要么落马
+  登记、要么如实写卡点」写进拒绝理由。判定只认 `ExecuteExtraTool` 调用行（入参里带
+  `tool_name`），不做全表 `ILIKE`——攻防任务的目标原文本身就含 `shell_add`，全表匹配
+  等于不检。
+- **攻防演练模板不带 agent 绑定**：模板「攻防演练」`agent_key` 为空，建出来的任务
+  自然拿不到 redteam 的打法与工具，已补为 `redteam`。
+
+#### 提示词（redteam，DB 内版本 4/5）
+
+- 新增「Shell 落地：能写就必须写，写了必须登记」：`落地 → shell_add 登记 → shell_exec
+  复核`；命令回显不等于 shell；需要登记时先查工具、不许没查就断言「工具不可用」；
+  清理放最后一步并留痕。
+- 补一条边界：拿不到 shell 不影响 RCE 漏洞本身上报——有真实命令回显或回连证据就
+  `report_finding`，shell 只作这次验证任务的闭环标准。
+
 ## [0.3.24] - 2026-11-03
 
 ### 授权范围：子域名不再被当成根域名，也不再被误判为越界
