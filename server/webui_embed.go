@@ -125,8 +125,9 @@ func gzipStatic(next http.Handler) http.Handler {
 // 再在 HTML 上发一次 Clear-Site-Data: "cache"，把浏览器里那份老的 immutable 缓存
 // 整个清掉。清完之后就是正常的「每次校验」行为，不再需要版本号。
 //
-// 这个开关发一个版本就够：下一次发版把它置回 false。
-var webuiClearSiteDataOnce = true
+// 这个开关发一个版本就够：0.3.35 / 0.3.36 各发过一次，老的 immutable 缓存已经
+// 清干净，从 0.3.37 起关掉——再发下去只是让用户每次都白掉一次缓存。
+var webuiClearSiteDataOnce = false
 
 // serveHTMLWithBuildTag 读 HTML 并返回。
 //
