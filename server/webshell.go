@@ -1586,6 +1586,113 @@ func (s *Server) webshellSaveSession(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// webshellBulkUpdateSessions 批量改会话的若干字段。
+//
+// 为什么单独开一个接口，而不是让页面复用 webshellSaveSession：保存接口是「整条覆盖」
+// 语义，password（马的参数名）和 header 的值在列表视图里是打码的，前端根本拿不到。
+// 批量改如果走保存接口，参数名会被重置成 "pass"——那等于把已经落在目标上的马改坏
+// （agent 用的是随机参数名，参数名一变，请求就进不去那个马了）。
+//
+// 语义：只有非空字段才生效，留空 = 保持原值。
+//   - note：备注
+//   - remote_path：马的远端绝对路径（清痕迹要用）
+//   - proxy：出口代理；填 direct / off / none 即强制直连
+//   - user_agent：覆盖默认 UA
+//
+// url / type / password / method / header / artifacts 一律原样保留。
+func (s *Server) webshellBulkUpdateSessions(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Names  []string `json:"names"`
+		Note   string   `json:"note"`
+		Remote string   `json:"remote_path"`
+		Proxy  string   `json:"proxy"`
+		UA     string   `json:"user_agent"`
+	}
+	if err := decode(r, &req); err != nil {
+		writeErr(w, 400, "请求体不是合法 JSON: "+err.Error())
+		return
+	}
+	if len(req.Names) == 0 {
+		writeErr(w, 400, "没指定要改哪些会话")
+		return
+	}
+	if len(req.Names) > 200 {
+		writeErr(w, 400, "一次最多改 200 条")
+		return
+	}
+	note := strings.TrimSpace(req.Note)
+	remotePath := strings.TrimSpace(req.Remote)
+	if remotePath != "" && !strings.HasPrefix(remotePath, "/") &&
+		!webshellWinAbsRE.MatchString(remotePath) {
+		writeErr(w, 400, fmt.Sprintf("remote_path 应是绝对路径（/var/www/html/s.php 或 C:\\inetpub\\s.aspx），收到: %q", remotePath))
+		return
+	}
+	proxy := strings.TrimSpace(req.Proxy)
+	if err := webshellValidateProxy(proxy); err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	ua := strings.TrimSpace(req.UA)
+	if len(ua) > 512 {
+		writeErr(w, 400, "user_agent 太长（上限 512 字符）")
+		return
+	}
+	if note == "" && remotePath == "" && proxy == "" && ua == "" {
+		writeErr(w, 400, "没填任何要改的字段")
+		return
+	}
+
+	path := s.webshellStorePath()
+	webshellStoreMu.Lock()
+	store, err := webshellLoadStore(path)
+	if err != nil {
+		webshellStoreMu.Unlock()
+		writeErr(w, 500, err.Error())
+		return
+	}
+	now := time.Now().Format("2006-01-02 15:04:05")
+	updated := make([]webshellSessionView, 0, len(req.Names))
+	missing := make([]string, 0)
+	for _, raw := range req.Names {
+		name := strings.TrimSpace(raw)
+		if name == "" {
+			continue
+		}
+		sess, ok := store[name]
+		if !ok {
+			missing = append(missing, name)
+			continue
+		}
+		if note != "" {
+			sess.Note = note
+		}
+		if remotePath != "" {
+			sess.RemotePath = remotePath
+		}
+		if proxy != "" {
+			sess.Proxy = proxy
+		}
+		if ua != "" {
+			sess.UserAgent = ua
+		}
+		sess.UpdatedAt = now
+		store[name] = sess
+		// 改了配置，旧的载荷模式缓存作废（和保存接口一致）
+		webshellDropMode(name)
+		updated = append(updated, webshellView(name, sess))
+	}
+	err = webshellSaveStore(path, store)
+	webshellStoreMu.Unlock()
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{
+		"updated": updated,
+		"missing": missing,
+	})
+}
+
 // webshellDeleteSession 删除一条会话。
 //
 // 默认只摘登记（与旧行为一致）；带 ?remote=1 时先进远端清痕迹：

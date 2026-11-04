@@ -327,10 +327,18 @@ export default function WebshellPage() {
     user_agent: "",
   });
 
-  // 删除确认
-  const [pendingDelete, setPendingDelete] = React.useState<string | null>(null);
+  // 删除确认（一条或多条）
+  const [pendingDelete, setPendingDelete] = React.useState<string[] | null>(null);
   // 删会话时要不要连远端一起清。默认不勾：删不删痕迹由人自己决定
   const [deleteRemote, setDeleteRemote] = React.useState(false);
+
+  // 多选：勾选后可批量改 / 批量删
+  const [checked, setChecked] = React.useState<string[]>([]);
+  const [bulkOpen, setBulkOpen] = React.useState(false);
+  const [bulkBusy, setBulkBusy] = React.useState(false);
+  // 批量改只动这四个字段：留空 = 保持原值。参数名/头/URL 这些页面拿不到（打码），
+  // 后端批量接口也不会碰它们，避免把 agent 落的马改坏。
+  const [bulkForm, setBulkForm] = React.useState({ note: "", remote_path: "", proxy: "", user_agent: "" });
 
   // 文件 Tab
   const [remotePath, setRemotePath] = React.useState("/");
@@ -545,42 +553,77 @@ export default function WebshellPage() {
   }
 
   async function doDelete() {
-    const name = pendingDelete;
-    if (!name) return;
+    const names = pendingDelete ?? [];
+    if (names.length === 0) return;
     setPendingDelete(null);
     const remote = deleteRemote;
-    try {
-      const r = await api.webshellDeleteSession(name, { remote });
-      if (remote) {
-        const p = r.purge;
-        const gone = p?.self_gone;
-        const arts = (p?.items ?? []).filter((it) => it.kind === "artifact");
-        const head = gone ? `已删除并清理远端「${name}」` : `已删除「${name}」`;
-        const tail = gone
-          ? `（马文件 ${p?.self_path ?? ""} 已删${arts.length > 0 ? `，另清上传残留 ${arts.length} 个` : ""}）`
-          : `（远端未清理：${p?.error ?? "未知原因"}）`;
-        toast.success(head + tail);
-      } else {
-        toast.success(`已删除会话「${name}」（远端文件保留）`);
+    const failed: string[] = [];
+    let purged = 0;
+    for (const name of names) {
+      try {
+        const r = await api.webshellDeleteSession(name, { remote });
+        if (remote && r.purge?.self_gone) purged += 1;
+      } catch (err) {
+        // 远端删不掉时后端保留登记（409），这里记下来最后一起报
+        failed.push(`${name}：${errMsg(err, "删除失败")}`);
       }
-      setHistory((h) => {
-        const next = { ...h };
-        delete next[name];
-        return next;
-      });
-      await loadSessions(false);
-    } catch (err) {
-      // 远端删不掉时后端保留登记（409），这里提示原因而不是当成普通失败
-      toast.error(errMsg(err, remote ? "删除失败：远端没清干净，会话登记已保留" : "删除失败"));
-      await loadSessions(false);
     }
+    setHistory((h) => {
+      const next = { ...h };
+      for (const name of names) delete next[name];
+      return next;
+    });
+    setChecked((c) => c.filter((n) => !names.includes(n)));
+    await loadSessions(false);
+    if (failed.length > 0) {
+      toast.error(`已删 ${names.length - failed.length} 条，${failed.length} 条没删掉（登记保留）：${failed.join("；")}`);
+      return;
+    }
+    if (remote) {
+      toast.success(`已删除 ${names.length} 条会话，其中 ${purged} 条远端已清理干净`);
+      return;
+    }
+    toast.success(`已删除 ${names.length} 条会话（远端文件保留）`);
   }
 
-  // 待删会话的落地路径（用于在确认框里说清楚会删什么）
-  const pendingSession = React.useMemo(
-    () => sessions.find((x) => x.name === pendingDelete) ?? null,
+  // 待删会话（用于在确认框里说清楚会删什么）
+  const pendingSessions = React.useMemo(
+    () => sessions.filter((x) => (pendingDelete ?? []).includes(x.name)),
     [sessions, pendingDelete],
   );
+
+  // ---- 批量改 ----
+  function openBulkEdit() {
+    setBulkForm({ note: "", remote_path: "", proxy: "", user_agent: "" });
+    setBulkOpen(true);
+  }
+
+  async function bulkSave() {
+    const names = checked.slice();
+    if (names.length === 0) return;
+    setBulkBusy(true);
+    try {
+      const r = await api.webshellBulkUpdateSessions(names, {
+        note: bulkForm.note.trim(),
+        remote_path: bulkForm.remote_path.trim(),
+        proxy: bulkForm.proxy.trim(),
+        user_agent: bulkForm.user_agent.trim(),
+      });
+      const updated = r.updated?.length ?? 0;
+      const missing = r.missing ?? [];
+      setBulkOpen(false);
+      await loadSessions(false);
+      if (missing.length > 0) {
+        toast.message(`已改 ${updated} 条，${missing.length} 条不在会话表里：${missing.join("、")}`);
+        return;
+      }
+      toast.success(`已改 ${updated} 条会话`);
+    } catch (err) {
+      toast.error(errMsg(err, "批量修改失败"));
+    } finally {
+      setBulkBusy(false);
+    }
+  }
 
   // ---- 文件 ----
   async function listRemote(path = remotePath) {
@@ -768,8 +811,34 @@ export default function WebshellPage() {
               </Badge>
             </CardTitle>
             <CardDescription className="text-xs">
-              点一下切换会话；悬停显示删除（默认只删登记，可勾选连远端一起删）。
+              点一下切换会话；左侧勾选后可批量改 / 批量删（删除默认只摘登记，可勾选连远端一起删）。
             </CardDescription>
+            {sessions.length > 0 ? (
+              <div className="flex flex-wrap items-center gap-2 pt-1">
+                <label className="flex cursor-pointer items-center gap-1.5 text-xs text-muted-foreground">
+                  <Checkbox
+                    checked={checked.length > 0 && checked.length === sessions.length}
+                    onCheckedChange={(v) => setChecked(v === true ? sessions.map((s) => s.name) : [])}
+                    aria-label="全选会话"
+                  />
+                  全选
+                </label>
+                {checked.length > 0 ? (
+                  <>
+                    <span className="text-xs">已选 {checked.length}</span>
+                    <Button size="sm" variant="outline" onClick={openBulkEdit}>
+                      批量修改
+                    </Button>
+                    <Button size="sm" variant="outline" onClick={() => setPendingDelete(checked)}>
+                      批量删除
+                    </Button>
+                    <Button size="sm" variant="ghost" onClick={() => setChecked([])}>
+                      清空
+                    </Button>
+                  </>
+                ) : null}
+              </div>
+            ) : null}
           </CardHeader>
           <CardContent className="min-h-0 px-2">
             {sessions.length === 0 ? (
@@ -806,6 +875,15 @@ export default function WebshellPage() {
                         {active ? (
                           <span className="absolute inset-y-1.5 left-0 w-[3px] rounded-full bg-primary" />
                         ) : null}
+                        <Checkbox
+                          checked={checked.includes(s.name)}
+                          onCheckedChange={(v) =>
+                            setChecked((c) => (v === true ? [...c, s.name] : c.filter((x) => x !== s.name)))
+                          }
+                          onClick={(e) => e.stopPropagation()}
+                          aria-label={`选择会话 ${s.name}`}
+                          className="ml-1 shrink-0"
+                        />
                         <button
                           type="button"
                           onClick={() => {
@@ -839,9 +917,9 @@ export default function WebshellPage() {
                         <Button
                           variant="ghost"
                           size="icon"
-                          className="size-7 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100"
-                          title="删除会话登记"
-                          onClick={() => setPendingDelete(s.name)}
+                          className="size-7 shrink-0 text-muted-foreground opacity-60 transition-opacity hover:opacity-100 focus-visible:opacity-100"
+                          title="删除会话登记（默认只删登记，可在确认框里勾选连远端一起删）"
+                          onClick={() => setPendingDelete([s.name])}
                         >
                           <Trash2Icon className="size-3.5" />
                         </Button>
@@ -1436,7 +1514,9 @@ export default function WebshellPage() {
       <AlertDialog open={pendingDelete !== null} onOpenChange={(v) => !v && setPendingDelete(null)}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>删除会话「{pendingDelete}」？</AlertDialogTitle>
+            <AlertDialogTitle>
+              {pendingSessions.length > 1 ? `删除选中的 ${pendingSessions.length} 个会话？` : `删除会话「${pendingSessions[0]?.name ?? ""}」？`}
+            </AlertDialogTitle>
             <AlertDialogDescription>
               {deleteRemote
                 ? "先删远端的马文件和上传残留，复查确认打不通后再摘掉本机记录。"
@@ -1453,17 +1533,27 @@ export default function WebshellPage() {
               <span>
                 同时删除远端文件（默认不删）
                 <span className="block text-muted-foreground">
-                  勾上：删掉马文件{((pendingSession?.artifacts?.length ?? 0) > 0) ? "和上传残留" : ""}并复查打不通；
+                  勾上：删掉马文件{((pendingSessions?.length ?? 0) > 0) ? "和上传残留" : ""}并复查打不通；
                   不勾：只摘本机登记，目标上的文件原样保留
                 </span>
               </span>
             </label>
-            <div className="font-mono text-[11px] text-muted-foreground">
-              落地路径：{pendingSession?.remote_path || "未记录（PHP eval 型可自报路径，命令型需手填）"}
-            </div>
-            {(pendingSession?.artifacts?.length ?? 0) > 0 ? (
+            {pendingSessions.length > 1 ? (
+              <div className="max-h-40 space-y-1 overflow-auto font-mono text-[11px] text-muted-foreground">
+                {pendingSessions.map((s) => (
+                  <div key={s.name} className="truncate">
+                    {s.name} · {s.remote_path || "未记录落地路径"}
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="font-mono text-[11px] text-muted-foreground">
+                落地路径：{pendingSessions[0]?.remote_path || "未记录（PHP eval 型可自报路径，命令型需手填）"}
+              </div>
+            )}
+            {(pendingSessions[0]?.artifacts?.length ?? 0) > 0 ? (
               <div className="text-[11px] text-muted-foreground">
-                上传残留 {pendingSession?.artifacts?.length} 个：{pendingSession?.artifacts?.join("、")}
+                上传残留 {pendingSessions[0]?.artifacts?.length} 个：{pendingSessions[0]?.artifacts?.join("、")}
               </div>
             ) : null}
           </div>
@@ -1475,6 +1565,61 @@ export default function WebshellPage() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      {/* ---- 批量修改 ---- */}
+      <Dialog open={bulkOpen} onOpenChange={(v) => !v && setBulkOpen(false)}>
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>批量修改 {checked.length} 个会话</DialogTitle>
+            <DialogDescription className="text-xs">
+              只改下面四个字段，留空表示保持原值。参数名、自定义头、URL 这些页面拿不到（打码），
+              也不会被改动——马不会被改坏。
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-3">
+            <div className="grid gap-1.5">
+              <Label className="text-xs">备注</Label>
+              <Input
+                value={bulkForm.note}
+                placeholder="留空 = 不改"
+                onChange={(e) => setBulkForm({ ...bulkForm, note: e.target.value })}
+              />
+            </div>
+            <div className="grid gap-1.5">
+              <Label className="text-xs">落地路径（马的远端绝对路径，清痕迹要用）</Label>
+              <Input
+                value={bulkForm.remote_path}
+                placeholder="留空 = 不改；如 /var/www/html/frontend/web/s.php"
+                onChange={(e) => setBulkForm({ ...bulkForm, remote_path: e.target.value })}
+              />
+            </div>
+            <div className="grid gap-1.5">
+              <Label className="text-xs">出口代理</Label>
+              <Input
+                value={bulkForm.proxy}
+                placeholder="留空 = 不改（继续跟随代理订阅）；填 direct = 强制直连"
+                onChange={(e) => setBulkForm({ ...bulkForm, proxy: e.target.value })}
+              />
+            </div>
+            <div className="grid gap-1.5">
+              <Label className="text-xs">User-Agent</Label>
+              <Input
+                value={bulkForm.user_agent}
+                placeholder="留空 = 不改"
+                onChange={(e) => setBulkForm({ ...bulkForm, user_agent: e.target.value })}
+              />
+            </div>
+          </div>
+          <div className="flex justify-end gap-2">
+            <Button variant="outline" onClick={() => setBulkOpen(false)} disabled={bulkBusy}>
+              取消
+            </Button>
+            <Button onClick={() => void bulkSave()} disabled={bulkBusy}>
+              {bulkBusy ? "保存中…" : `保存到 ${checked.length} 个会话`}
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
 
       {/* ---- Payload 全文抽屉 ---- */}
       <Sheet open={payloadOpen} onOpenChange={setPayloadOpen}>

@@ -980,6 +980,8 @@ func (s *Server) Handler() http.Handler {
 	// 页面点一下就有响应；命令执行/上传/下载的载荷协议见 webshell.go。
 	mux.HandleFunc("GET /api/webshell/sessions", s.webshellListSessions)
 	mux.HandleFunc("POST /api/webshell/sessions", s.webshellSaveSession)
+	// 批量改：只改备注/落地路径/出口代理/UA，参数名等敏感字段原样保留
+	mux.HandleFunc("POST /api/webshell/sessions/bulk", s.webshellBulkUpdateSessions)
 	mux.HandleFunc("DELETE /api/webshell/sessions/{name}", s.webshellDeleteSession)
 	mux.HandleFunc("POST /api/webshell/exec", s.webshellExec)
 	mux.HandleFunc("POST /api/webshell/upload", s.webshellUpload)

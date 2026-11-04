@@ -1452,6 +1452,20 @@ export const api = {
       proxy: input.proxy ?? "",
       user_agent: input.user_agent ?? "",
     }),
+  // 批量改会话：只改备注 / 落地路径 / 出口代理 / UA，留空 = 保持原值。
+  // 参数名、自定义头、URL 这些在列表里是打码的，页面改不到——后端也不会碰，
+  // 免得把 agent 落的马改坏。
+  webshellBulkUpdateSessions: (
+    names: string[],
+    fields: { note?: string; remote_path?: string; proxy?: string; user_agent?: string },
+  ) =>
+    post<{ updated: WebshellSession[]; missing: string[] }>("/webshell/sessions/bulk", {
+      names,
+      note: fields.note ?? "",
+      remote_path: fields.remote_path ?? "",
+      proxy: fields.proxy ?? "",
+      user_agent: fields.user_agent ?? "",
+    }),
   // 删除会话。opts.remote=true 会先进远端清痕迹（删马文件 + 上传残留 + 复查），
   // 清不干净时后端回 409 并保留登记（除非再传 force）。
   webshellDeleteSession: (
