@@ -2045,3 +2045,27 @@ WHERE exploration_id=$1
 	}
 	return n, nil
 }
+
+// HasLandedShellSession 判断给定的主机名里，是否有任一个属于本探索对应的任务资产。
+//
+// prove_goal 的 shell 校验先看活动记录里有没有 shell_add 调用，但那条路只覆盖
+// 「agent 自己在本次运行里登记的会话」。操作员在 WebShell 页面上手工加、或由别的
+// 进程调 MCP 登记的会话，活动表里查不到——可它落在同一台主机上，就是真拿到了。
+// 这里按「会话 URL 的主机 ∈ 任务资产（domain / ip / url）」兜住这种情况。
+func (s *ExplorationStore) HasLandedShellSession(hosts []string) (bool, error) {
+	if s == nil || s.db == nil || len(hosts) == 0 {
+		return false, nil
+	}
+	var n int
+	err := s.db.QueryRow(`
+SELECT count(*) FROM assets a
+JOIN tasks t ON t.id = ANY(a.task_ids)
+WHERE t.exploration_id = $1
+  AND (a.domain = ANY($2) OR a.ip = ANY($2)
+       OR EXISTS (SELECT 1 FROM unnest($2::text[]) h WHERE a.url ILIKE '%' || h || '%'))`,
+		s.expID, hosts).Scan(&n)
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}

@@ -2,6 +2,28 @@
 
 本项目的重要变更记录在此文件中，格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.3.28] - 2026-11-04
+
+### prove_goal：人工/外部登记的 shell 也算「已落地」
+
+#### 修复的问题
+
+- **只在活动记录里找 shell_add，太窄**：0.3.26 加的校验只认 `ExecuteExtraTool` 调用行。
+  可马不一定由本次运行的 agent 登记——操作员在 WebShell 页面上手工加一条、或换一个进程调
+  MCP 落马，`activity` 里都不会有记录。结果是真落了马、页面上有会话，`prove_goal` 照样
+  判「没拿到 shell」，把目标卡在 open。
+- **新增归属判定**：`ExplorationStore.HasLandedShellSession(hosts)` 按「会话 URL 的主机
+  ∈ 本任务资产（`domain` / `ip` / `url`）」判断，`server.landedShellForExploration` 从
+  `webshells.json` 取主机名后注入 `agent.ShellSessionLanded`。判定顺序改为：
+  活动里有 `shell_add` → 任务资产上有落地会话 → 证据里如实写了「未取得 shell」；
+  三者都不满足才拒绝，拒绝理由仍是「要么落马登记、要么如实写卡点」。
+
+#### 测试
+
+- `TestShellGoalVerdict`：三路证据的六种组合（含未接线、`expID=0` 不能靠 hook 放行）。
+- `TestHasLandedShellSession`（db，真实 PG）：按 IP、按域名命中，无关主机与空列表不命中。
+- `TestNodeTextFields`：goal 的 `text` 与 fact 的 `detail` 都要能抽出来做匹配。
+
 ## [0.3.27] - 2026-11-04
 
 ### WebShell：加密载荷 + 随机参数名，落地不再留明文特征

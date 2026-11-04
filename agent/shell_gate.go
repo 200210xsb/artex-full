@@ -53,6 +53,26 @@ func nodeText(n *db.Node) string {
 	return string(n.Payload)
 }
 
+// ShellSessionLanded 由 host 注入：本探索对应的任务资产上，是否已有登记的 WebShell 会话。
+// 这条兜的是「会话登记在活动记录之外」的情形（页面上手工加、别的进程调 MCP）。
+// 未注入时只看活动记录。
+var ShellSessionLanded func(explorationID int64) bool
+
+// shellGoalVerdict 汇总三路证据：活动里的 Webshell 调用、任务资产上的落地会话、
+// 证据里是否如实写了「未取得 shell」。返回空串表示放行，否则是给模型的拒绝理由。
+func shellGoalVerdict(usageCount int, explorationID int64, landed func(int64) bool, evidenceText string) string {
+	if shellAbsenceRE.MatchString(evidenceText) {
+		return ""
+	}
+	if usageCount > 0 {
+		return ""
+	}
+	if landed != nil && explorationID > 0 && landed(explorationID) {
+		return ""
+	}
+	return shellGateRejectMsg
+}
+
 // guardShellGoal 返回非空字符串表示拒绝本次 prove_goal，字符串就是给模型的理由。
 func guardShellGoal(ts *db.ExplorationStore, goal, evidence *db.Node) string {
 	if ts == nil || goal == nil {
@@ -61,16 +81,11 @@ func guardShellGoal(ts *db.ExplorationStore, goal, evidence *db.Node) string {
 	if !shellGoalRE.MatchString(nodeText(goal)) {
 		return ""
 	}
-	if shellAbsenceRE.MatchString(nodeText(evidence)) {
-		return ""
+	usage := 0
+	if n, err := ts.WebshellToolUsage(); err == nil {
+		usage = n
 	}
-	n, err := ts.WebshellToolUsage()
-	if err != nil {
-		// 查不动就不拦（宁可放过，不要让一次 DB 抖动把目标判定卡死）。
-		return ""
-	}
-	if n > 0 {
-		return ""
-	}
-	return shellGateRejectMsg
+	// 查不动就不拦（宁可放过，不要让一次 DB 抖动把目标判定卡死）：usage 保持 0 时
+	// 还有会话库那条路，最后才由证据里的「未取得 shell」兜底。
+	return shellGoalVerdict(usage, ts.ID(), ShellSessionLanded, nodeText(evidence))
 }
