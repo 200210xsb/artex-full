@@ -1764,6 +1764,10 @@ export interface WebshellSession {
   has_header: boolean;
   /** 自定义头的键名（没有值） */
   header_keys: string[];
+  /** 马的远端绝对路径；没填就为空（清痕迹时命令型马必须靠它） */
+  remote_path?: string;
+  /** 上传过的远端文件，删会话时会一并清理 */
+  artifacts?: string[];
 }
 
 /** GET /api/webshell/sessions：列表 + 会话库落盘路径。 */
@@ -1784,6 +1788,8 @@ export interface WebshellSessionInput {
   /** JSON 对象字符串，例如 {"X-Token":"abc"} */
   header?: string;
   note?: string;
+  /** 马的远端绝对路径，如 /var/www/html/s.php（清痕迹要用） */
+  remote_path?: string;
 }
 
 /** POST /api/webshell/exec：命令回显 + 载荷模式（eval/raw/cmd）+ 耗时。 */

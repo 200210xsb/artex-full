@@ -42,6 +42,7 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
 import { Input } from "@/components/ui/input";
@@ -321,10 +322,13 @@ export default function WebshellPage() {
     method: "POST",
     header: "",
     note: "",
+    remote_path: "",
   });
 
   // 删除确认
   const [pendingDelete, setPendingDelete] = React.useState<string | null>(null);
+  // 删会话时要不要连远端一起清。默认不勾：删不删痕迹由人自己决定
+  const [deleteRemote, setDeleteRemote] = React.useState(false);
 
   // 文件 Tab
   const [remotePath, setRemotePath] = React.useState("/");
@@ -503,7 +507,7 @@ export default function WebshellPage() {
 
   // ---- 会话增删 ----
   function openAdd() {
-    setForm({ name: "", url: "", type: "php", password: "pass", method: "POST", header: "", note: "" });
+    setForm({ name: "", url: "", type: "php", password: "pass", method: "POST", header: "", note: "", remote_path: "" });
     setAddOpen(true);
   }
 
@@ -522,6 +526,7 @@ export default function WebshellPage() {
         method: form.method,
         header: form.header.trim(),
         note: form.note.trim(),
+        remote_path: form.remote_path.trim(),
       });
       toast.success(r.overwritten ? `已覆盖会话「${r.session.name}」` : `已添加会话「${r.session.name}」`);
       setAddOpen(false);
@@ -539,9 +544,21 @@ export default function WebshellPage() {
     const name = pendingDelete;
     if (!name) return;
     setPendingDelete(null);
+    const remote = deleteRemote;
     try {
-      await api.webshellDeleteSession(name);
-      toast.success(`已删除会话「${name}」`);
+      const r = await api.webshellDeleteSession(name, { remote });
+      if (remote) {
+        const p = r.purge;
+        const gone = p?.self_gone;
+        const arts = (p?.items ?? []).filter((it) => it.kind === "artifact");
+        const head = gone ? `已删除并清理远端「${name}」` : `已删除「${name}」`;
+        const tail = gone
+          ? `（马文件 ${p?.self_path ?? ""} 已删${arts.length > 0 ? `，另清上传残留 ${arts.length} 个` : ""}）`
+          : `（远端未清理：${p?.error ?? "未知原因"}）`;
+        toast.success(head + tail);
+      } else {
+        toast.success(`已删除会话「${name}」（远端文件保留）`);
+      }
       setHistory((h) => {
         const next = { ...h };
         delete next[name];
@@ -549,9 +566,17 @@ export default function WebshellPage() {
       });
       await loadSessions(false);
     } catch (err) {
-      toast.error(errMsg(err, "删除失败"));
+      // 远端删不掉时后端保留登记（409），这里提示原因而不是当成普通失败
+      toast.error(errMsg(err, remote ? "删除失败：远端没清干净，会话登记已保留" : "删除失败"));
+      await loadSessions(false);
     }
   }
+
+  // 待删会话的落地路径（用于在确认框里说清楚会删什么）
+  const pendingSession = React.useMemo(
+    () => sessions.find((x) => x.name === pendingDelete) ?? null,
+    [sessions, pendingDelete],
+  );
 
   // ---- 文件 ----
   async function listRemote(path = remotePath) {
@@ -739,7 +764,7 @@ export default function WebshellPage() {
               </Badge>
             </CardTitle>
             <CardDescription className="text-xs">
-              点一下切换会话；悬停显示删除（只删登记，不动远端文件）。
+              点一下切换会话；悬停显示删除（默认只删登记，可勾选连远端一起删）。
             </CardDescription>
           </CardHeader>
           <CardContent className="min-h-0 px-2">
@@ -1332,6 +1357,16 @@ export default function WebshellPage() {
                   placeholder="入口点 / 权限 / 来源"
                 />
               </div>
+              <div className="flex flex-col gap-1.5">
+                <Label>落地路径（建议填）</Label>
+                <Input
+                  value={form.remote_path}
+                  onChange={(e) => setForm({ ...form, remote_path: e.target.value })}
+                  placeholder="/var/www/html/static_xxx.php"
+                  className="font-mono"
+                />
+                <span className="text-xs text-muted-foreground">清痕迹时靠它删远端文件</span>
+              </div>
             </div>
             <div className="flex flex-col gap-1.5">
               <Label>自定义 Header（可选，JSON 对象）</Label>
@@ -1363,14 +1398,42 @@ export default function WebshellPage() {
       <AlertDialog open={pendingDelete !== null} onOpenChange={(v) => !v && setPendingDelete(null)}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>删除会话登记「{pendingDelete}」？</AlertDialogTitle>
+            <AlertDialogTitle>删除会话「{pendingDelete}」？</AlertDialogTitle>
             <AlertDialogDescription>
-              只删本机的 webshells.json 记录，远端 webshell 文件与已上传/下载的文件都不动。
+              {deleteRemote
+                ? "先删远端的马文件和上传残留，复查确认打不通后再摘掉本机记录。"
+                : "只删本机的 webshells.json 记录，远端 webshell 文件与已上传的文件都保留（痕迹还在）。"}
             </AlertDialogDescription>
           </AlertDialogHeader>
+          <div className="space-y-2 rounded-md border p-3 text-xs">
+            <label className="flex cursor-pointer items-start gap-2">
+              <Checkbox
+                checked={deleteRemote}
+                onCheckedChange={(v) => setDeleteRemote(v === true)}
+                className="mt-0.5"
+              />
+              <span>
+                同时删除远端文件（默认不删）
+                <span className="block text-muted-foreground">
+                  勾上：删掉马文件{((pendingSession?.artifacts?.length ?? 0) > 0) ? "和上传残留" : ""}并复查打不通；
+                  不勾：只摘本机登记，目标上的文件原样保留
+                </span>
+              </span>
+            </label>
+            <div className="font-mono text-[11px] text-muted-foreground">
+              落地路径：{pendingSession?.remote_path || "未记录（PHP eval 型可自报路径，命令型需手填）"}
+            </div>
+            {(pendingSession?.artifacts?.length ?? 0) > 0 ? (
+              <div className="text-[11px] text-muted-foreground">
+                上传残留 {pendingSession?.artifacts?.length} 个：{pendingSession?.artifacts?.join("、")}
+              </div>
+            ) : null}
+          </div>
           <AlertDialogFooter>
             <AlertDialogCancel>取消</AlertDialogCancel>
-            <AlertDialogAction onClick={() => void doDelete()}>删除</AlertDialogAction>
+            <AlertDialogAction onClick={() => void doDelete()}>
+              {deleteRemote ? "删除并清痕迹" : "只删登记"}
+            </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>

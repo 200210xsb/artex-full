@@ -1448,9 +1448,34 @@ export const api = {
       method: input.method ?? "POST",
       header: input.header ?? "",
       note: input.note ?? "",
+      remote_path: input.remote_path ?? "",
     }),
-  webshellDeleteSession: (name: string) =>
-    del<{ deleted: string; type: string; remaining: number }>(`/webshell/sessions/${encodeURIComponent(name)}`),
+  // 删除会话。opts.remote=true 会先进远端清痕迹（删马文件 + 上传残留 + 复查），
+  // 清不干净时后端回 409 并保留登记（除非再传 force）。
+  webshellDeleteSession: (
+    name: string,
+    opts?: { remote?: boolean; force?: boolean; path?: string },
+  ) => {
+    const qs = new URLSearchParams();
+    if (opts?.remote) qs.set("remote", "1");
+    if (opts?.force) qs.set("force", "1");
+    if (opts?.path) qs.set("path", opts.path);
+    const q = qs.toString();
+    return del<{
+      deleted: string;
+      type: string;
+      remaining: number;
+      purge?: {
+        attempted: boolean;
+        self_path?: string;
+        self_gone: boolean;
+        items?: { kind: string; path: string; status: string }[];
+        confirm?: string;
+        error?: string;
+      };
+      hint?: string;
+    }>(`/webshell/sessions/${encodeURIComponent(name)}${q ? `?${q}` : ""}`);
+  },
   // 执行一条命令：后端按会话类型复刻载荷协议（eval / 免杀马 / 命令型）。
   webshellExec: (name: string, cmd: string, timeoutSeconds = 30) =>
     post<WebshellExecResult>("/webshell/exec", { name, cmd, timeout: timeoutSeconds }),

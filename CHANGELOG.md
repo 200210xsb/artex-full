@@ -2,6 +2,45 @@
 
 本项目的重要变更记录在此文件中，格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.3.29] - 2026-11-04
+
+### 会话删除可选清远端 + 载荷不再自带说明书
+
+#### 新增
+
+- **`shell_del` / 页面删除支持「连远端一起删」，但不默认**：默认只摘本机
+  `/opt/artex/data/webshells.json` 登记，远端文件一概不动——马留不留由操作的人决定。
+  要清痕迹得显式开：
+  - MCP：`shell_del(name, remove_remote=true)`；
+  - 页面：删除确认框勾「同时删除远端文件（默认不删）」，勾了才带 `?remote=1`。
+  开了之后才会：删远端马文件 → 删该会话 `shell_upload` 上传过的残留 → 再请求一次
+  URL 复查确认打不通 → 最后摘登记。远端没清干净会报错并**保留登记**（活着的马不能
+  静默失联），确要丢弃登记传 `force=true`。
+- `shell_add` / `POST /api/webshell/sessions` 新增 `remote_path`（马的绝对落地路径），
+  页面上也加了「落地路径」输入框；`shell_upload` 把写过的远端路径记进会话 `artifacts`，
+  清理时按清单删。
+
+#### 修复的问题
+
+- **落地文件自带说明书**：`payload_get` 以前把库里文件头的 `@summary / @scene / @perm /
+  @bypass / @mcp` 注释原样下发，落到目标上的马开头就写着「这是加密载荷、参数名随机、
+  绕的是哪类 WAF」——等于把用法贴在文件里。现在下发前剥掉这段注释（只保留 `<?php`），
+  元信息仍在上方给 agent 看，库里原文件不动。php/enc.php 因此从 1239 字节降到 376 字节。
+- **`__FILE__` 定位无效**：马是 eval 执行的，`__FILE__` 会变成
+  `/var/www/x.php(17) : eval()'d code` 这种伪路径，`unlink` 静默失败、还报「原本就不存在」。
+  改用 `$_SERVER['SCRIPT_FILENAME']` → `get_included_files()[0]` → `__FILE__` 三级回退
+  加 `realpath`，实测能拿到真实绝对路径。
+- **复查判据太松**：以前拿「响应里没有标记」当已删除，可加密马收到不认识的载荷本来就回空。
+  改成发一个必然回显的探测载荷，取不到回显才算删掉。
+
+#### 实测（目标 142.132.182.230，php eval 型加密马）
+
+- 默认：`shell_del(name)` → 只摘登记，`ls` 复查远端文件仍在。
+- 显式：`shell_del(name, remove_remote=true)` → 马文件 OK、复查 404、`ls` 确认不存在。
+- 页面 API：`DELETE`（不带参数）→ 200 且文件仍在；`DELETE ?remote=1` → 200 +
+  `self_gone=true`；路径不存在时 → 409 保留登记，`?remote=1&force=1` → 200。
+- 载荷：新落地文件 376 字节，`head` 只剩 `<?php` + 四行逻辑，无任何说明文字。
+
 ## [0.3.28] - 2026-11-04
 
 ### prove_goal：人工/外部登记的 shell 也算「已落地」
