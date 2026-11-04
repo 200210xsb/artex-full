@@ -876,8 +876,14 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 		// coalesces a burst; empty for time/heartbeat wakes).
 		triggers := t.drainTriggers()
 		taskIDInt, _ := strconv.ParseInt(t.ID, 10, 64)
+		// 目标可能被人工/脚本改过（模版纠错等）：每轮规划前从 PG 重读一次，
+		// 让改完的目标立即生效，不必重启服务。读失败时保留内存里的旧值。
+		goal := e.m.RefreshGoal(t.ID)
+		if goal == "" {
+			goal = t.GoalText()
+		}
 		e.BeginLLMCall(t.ID)
-		met, reason, err := planner.Plan(ectx, taskIDInt, e.m.assets, t.Store, t.Goal, triggers, emit)
+		met, reason, err := planner.Plan(ectx, taskIDInt, e.m.assets, t.Store, goal, triggers, emit)
 		e.EndLLMCall(t.ID)
 		switch {
 		case err != nil && ectx.Err() == nil:

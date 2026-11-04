@@ -39,6 +39,7 @@ type Task struct {
 	CompletedAt  int64  `json:"completed_at,omitempty"` // 进入终态的 unix 秒;0=未完成
 	Paused       bool   `json:"paused"`
 	Queued       bool   `json:"queued"` // 因并发上限被挂起、等待空位自动启动;true=尚未开跑
+
 	// QueuedAt is an internal Unix-nanosecond ordering key. It is deliberately
 	// finer than CreatedAt so several tasks enqueued in the same second retain
 	// their real FIFO order.
@@ -69,12 +70,39 @@ type Task struct {
 	notify               chan struct{}
 	lifecycleMu          sync.RWMutex
 	llmMu                sync.RWMutex
+	// goalMu 保护 Goal：任务目标会被人工/脚本改（模版纠错、目标重写），
+	// planner 每轮都要读到最新值，所以它不是创建时的一次性快照。
+	goalMu sync.RWMutex
 
 	// pendingTriggers accumulates the concrete changes (worker done / finding) that
 	// fired planning rounds since the last one consumed them. The debounce coalesces
 	// a burst into one round, so several may pile up before drainTriggers() clears them.
 	trigMu          sync.Mutex
 	pendingTriggers []agent.TriggerEvent
+}
+
+// GoalText 返回任务当前的目标文本（并发安全）。
+//
+// Goal 不是创建时的一次性快照：任务目标会被人工或脚本改写（模版纠错、
+// 目标重写），而 planner / worker 每轮都要按【最新】目标工作——否则改完
+// DB 里还是旧的，运行中的任务仍按旧口径派意图。
+func (t *Task) GoalText() string {
+	if t == nil {
+		return ""
+	}
+	t.goalMu.RLock()
+	defer t.goalMu.RUnlock()
+	return t.Goal
+}
+
+// SetGoal 更新任务目标文本（并发安全）。
+func (t *Task) SetGoal(goal string) {
+	if t == nil {
+		return
+	}
+	t.goalMu.Lock()
+	t.Goal = goal
+	t.goalMu.Unlock()
 }
 
 // taskLifecycleState is an internally consistent view of the mutable task
@@ -1759,6 +1787,35 @@ func (m *Manager) Task(id string) (*Task, bool) {
 	defer m.mu.RUnlock()
 	t, ok := m.tasks[id]
 	return t, ok
+}
+
+// RefreshGoal 从 PG 重读任务目标并同步进内存快照，返回最新目标文本。
+//
+// 为什么需要它：Task.Goal 原本是 taskFromPG 建任务时读一次 PG 就定下的快照，
+// 之后一直用内存里的旧值。任务目标是可以被改的（模版纠错、目标重写），
+// 改了 DB 之后运行中的任务仍按旧口径工作——最典型的后果就是模版里
+// 「验证完删马核验 404」这类旧口径继续生效，agent 把刚落地的马删掉，
+// WebShell 功能页里就再也看不到那个会话了。
+//
+// 读失败时保留内存里的旧值（宁可继续用旧目标，也不要把任务打空）。
+func (m *Manager) RefreshGoal(taskID string) string {
+	t, ok := m.Task(taskID)
+	if !ok || t == nil {
+		return ""
+	}
+	id, err := strconv.ParseInt(taskID, 10, 64)
+	if err != nil || id <= 0 {
+		return t.GoalText()
+	}
+	pt, err := m.pg.GetTask(id)
+	if err != nil || pt == nil {
+		return t.GoalText()
+	}
+	if pt.Goal != t.GoalText() {
+		t.SetGoal(pt.Goal)
+		log.Printf("[manager] task %s 目标已刷新（%d 字）", taskID, len(pt.Goal))
+	}
+	return pt.Goal
 }
 
 // ActiveTask returns the currently active task (or nil).

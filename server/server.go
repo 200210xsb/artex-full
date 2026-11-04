@@ -1108,7 +1108,7 @@ func (s *Server) stats(w http.ResponseWriter, r *http.Request) {
 	out["engine_mode"] = engineMode
 
 	out["active_task"] = map[string]any{
-		"id": t.ID, "description": t.Description, "goal": t.Goal,
+		"id": t.ID, "description": t.Description, "goal": t.GoalText(),
 		"running":       running,
 		"paused":        paused,
 		"engine_mode":   engineMode,
@@ -1943,7 +1943,7 @@ func (s *Server) seed(t *Task, text string) {
 // origin fact (RelDerivedFrom) so it still traces back to a fact node. Best-effort —
 // a failure just falls back to the normal planner-driven flow.
 func (s *Server) seedFirstIntent(t *Task) {
-	summary := fmt.Sprintf("完成任务目标：%s（任务：%s）", t.Goal, t.Description)
+	summary := fmt.Sprintf("完成任务目标：%s（任务：%s）", t.GoalText(), t.Description)
 	id, err := t.Store.AddIntent(map[string]any{"summary": summary}, 8, nil, "seed")
 	if err != nil {
 		log.Printf("[seed] task %s: 下发种子意图失败: %v", t.ID, err)
@@ -3979,7 +3979,12 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 			taskDir := filepath.Join(s.m.dir, "tasks", t.ID)
 			agentMsg := composeAgentMessage(agentMessage, req.Attachments, taskDir)
 			s.engine.BeginLLMCall(t.ID)
-			_, err := ma.Chat(ctx, maTaskID, mainSeg, s.m.Assets(), t.Store, t.Goal, agentMsg, emit, t.Notify, resume, t.NotifyGoal, t.NotifyHint)
+			// 主 agent 也按最新目标工作（目标可能刚被改过）
+			maGoal := s.m.RefreshGoal(t.ID)
+			if maGoal == "" {
+				maGoal = t.GoalText()
+			}
+			_, err := ma.Chat(ctx, maTaskID, mainSeg, s.m.Assets(), t.Store, maGoal, agentMsg, emit, t.Notify, resume, t.NotifyGoal, t.NotifyHint)
 			s.engine.EndLLMCall(t.ID)
 			if err != nil && ctx.Err() == nil {
 				s.engine.emitActivity(t, db.Activity{Worker: "mainagent", Kind: "text", IsError: true, Summary: "（主 Agent 出错：" + err.Error() + "）", MainSeg: segPtr})
@@ -4083,7 +4088,7 @@ func (s *Server) getReport(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	md := report.Markdown(report.Input{
-		Title: t.Description, Goal: t.Goal, GeneratedAt: time.Now(),
+		Title: t.Description, Goal: t.GoalText(), GeneratedAt: time.Now(),
 		AssetCounts: counts, Findings: findings,
 	})
 	w.Header().Set("Content-Type", "text/markdown; charset=utf-8")

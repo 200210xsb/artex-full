@@ -121,7 +121,7 @@ func taskDTO(t *Task, status string) TaskDTO {
 		Pinned:             lifecycle.PinnedAt > 0,
 		PinnedAt:           completedRFC(lifecycle.PinnedAt),
 		Description:        t.Description,
-		Goal:               t.Goal,
+		Goal:               t.GoalText(),
 		Status:             status,
 		CreatedAt:          rfc3339(time.Unix(t.CreatedAt, 0)),
 		CreatedUnix:        t.CreatedAt,

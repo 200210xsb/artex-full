@@ -74,6 +74,91 @@ ALLOW_REMOTE_DELETE = os.environ.get("ARTEX_WEBSHELL_ALLOW_REMOTE_DELETE", "1").
     "", "0", "off", "false", "no"
 )
 
+# 落地马路径守卫：agent 不许自己删掉已经落地验证的 webshell。
+#
+# 为什么要有这一层：shell_del 的 human_approved 闸只挡住了「走 shell_del 这条路」
+# 的删除，但 agent 完全可以绕开它——用 shell_exec 直接在目标上跑
+# `rm -f /path/to/shell.php` 或 `unlink('/path/to/shell.php')`。那条路一旦走通，
+# 目标上的马就没了，WebShell 功能页里虽然还挂着登记，但点进去已经打不通，
+# 等于「验证完就自毁」，正是任务模版与提示词反复强调要避免的情况。
+#
+# 口径与提示词 v9 一致：远端留不留由人决定，agent 一律不主动删。
+# 例外：分析用的临时探针/脚本不在守卫范围内（那是 agent 自己上传的中间件，
+# 收尾时该清），只有【本会话登记在案的落地马路径】受保护。
+#
+# 环境变量 ARTEX_WEBSHELL_ALLOW_REMOTE_DELETE=0 可整条关掉守卫（默认开闸）。
+_GUARD_MA_RE = re.compile(
+    r"(?i)\b(rm|rmdir|unlink|shred|del|erase|remove-item|rm\s+-f)\b"
+)
+
+
+def _session_guarded_paths(sess):
+    """本会话里「不许 agent 主动删」的远端路径集合。
+
+    只含落地马自身（remote_path）。shell_upload 的中间产物（artifacts）是
+    agent 自己上传的分析用临时件，收尾时允许清，不在保护范围内。
+    """
+    paths = []
+    rp = (sess.get("remote_path") or "").strip()
+    if rp:
+        paths.append(rp)
+    return paths
+
+
+def _cmd_targets_path(cmd, path):
+    """命令文本里是否引用了给定路径（含 basename 单独出现的情况）。"""
+    if not cmd or not path:
+        return False
+    if path in cmd:
+        return True
+    # Windows 路径大小写不敏感；且 agent 常用 basename（如 cd 过去再 rm file.php）
+    base = re.split(r"[\\/]", path)[-1]
+    if base and len(base) >= 6 and base in cmd:
+        return True
+    return False
+
+
+def _cmd_targets_ancestor_dir(cmd, path):
+    """命令文本里是否在删落地马所在的【父目录】（如 rm -rf /var/www/html）。
+
+    这种情况同样会把马删掉（马在目录里），所以一并拦住。
+    只认「父目录本身」这个粒度：路径必须完整成词（前后不是路径字符），
+    这样 rm -rf /var/www/html 会拦，而 rm -rf /var/www/html/uploads（子目录、
+    不是马所在目录）不会误伤。更上层的目录（rm -rf /var）由 Bash 侧的 hook
+    规则管，不在本工具层重复拦。
+    """
+    if not cmd or not path:
+        return False
+    norm = path.replace("\\", "/")
+    parent = norm.rsplit("/", 1)[0] if "/" in norm else ""
+    if not parent or parent in ("/", ""):
+        return False
+    pat = r"(?<![\w./\\-])" + re.escape(parent) + r"(?![\w./\\-])"
+    return re.search(pat, cmd.replace("\\", "/")) is not None
+
+
+def _guard_remote_horse_delete(name, sess, cmd):
+    """若 cmd 试图删除本会话的落地马，且没有人工授权位 → 抛 ToolError。
+
+    只拦「删除已登记落地马」这一件事，不拦删临时探针、删自己的脚本等。
+    """
+    if not ALLOW_REMOTE_DELETE:
+        return
+    guarded = _session_guarded_paths(sess)
+    if not guarded:
+        return
+    if not _GUARD_MA_RE.search(cmd or ""):
+        return
+    for p in guarded:
+        if _cmd_targets_path(cmd, p) or _cmd_targets_ancestor_dir(cmd, p):
+            raise ToolError(
+                "拒绝执行：这条命令要删除本会话已登记的落地马（%s）。\n"
+                "落地马由人决定留不留，agent 不能自己清场——验证完成后自行删马，"
+                "会让 WebShell 功能页里的会话点进去打不通。\n"
+                "如需清理远端：请人工在 WebShell 功能页删除（可勾选「同时删除远端文件」）；"
+                "分析用的临时探针/脚本不在保护范围内，可放心自行清理。" % p
+            )
+
 VALID_TYPES = ("php", "php_raw", "jsp", "aspx")
 
 # 内置 payload 库：<根目录>/<type>/<file>，payload_get 只允许访问这下面
@@ -1096,7 +1181,9 @@ def tool_shell_list(args):
     text = "共 %d 个会话（名称 | 类型 | URL | 方法 | 落地路径 | 上传残留 | 备注 | 创建时间）\n%s" % (
         len(store), "\n".join(rows))
     text += ("\n（安全约定：不展示参数名与自定义 header；执行用 shell_exec，"
-             "上传 shell_upload，下载 shell_download，清远端痕迹要 shell_del 显式传 remove_remote=true）")
+             "上传 shell_upload，下载 shell_download。"
+             "落地马与登记默认一律保留——收尾清理只用默认的 shell_del（只清本次上传的临时件）；"
+             "删远端马或摘登记都需要 human_approved=true 的人工授权，agent 不得自行置位）")
     return text, False
 
 
@@ -1109,6 +1196,10 @@ def tool_shell_exec(args):
     cmd = req_str(args, "cmd", "要执行的命令 / 代码")
     timeout = as_int(args.get("timeout"), 30, 1, 600)
     sess = _get_session(name)
+
+    # 落地马路径守卫：agent 绕开 shell_del、直接 rm/unlink 落地马时拦下来。
+    # 远端留不留由人决定，agent 一律不主动删。
+    _guard_remote_horse_delete(name, sess, cmd)
 
     t0 = time.time()
     out = _exec_cmd(name, sess, cmd, timeout)
@@ -1441,6 +1532,54 @@ def _confirm_self_gone(name, sess, timeout):
     return True, "复查响应里已无马的回显"
 
 
+def _purge_uploads(name, sess, timeout):
+    """只删本次分析上传的远端临时件（shell_upload 残留），不碰落地马。
+
+    这是 agent 收尾时【允许】做的事：探针/脚本是它自己上传的中间产物。
+    落地马文件（remote_path）不在删除范围内——远端留不留由人决定。
+
+    返回报告行列表；没有残留可清时返回一行说明，不报错。
+    """
+    typ = (sess.get("type") or "").strip()
+    artifacts = [p for p in (sess.get("artifacts") or [])
+                 if isinstance(p, str) and p.strip()]
+    # 落地马自身永远不在清理范围内
+    horse = (sess.get("remote_path") or "").strip()
+    targets = [p for p in artifacts if p != horse]
+    if not targets:
+        return ["  临时件: 无（本次会话没有 shell_upload 的残留可清；马文件与登记都保留）"]
+
+    lines = []
+    if typ in ("php", "php_raw") and _mode_of(name) != "raw":
+        try:
+            out = _run_php_code(name, sess, _php_del_code(targets, False), timeout)
+        except ModeMismatch:
+            raise ToolError("该会话已判定为命令执行型马，无法用 PHP unlink 清理临时件；"
+                            "请人工在 WebShell 功能页处理")
+        res = _parse_del_out(out)
+        if not res:
+            raise ToolError("远端 unlink 没回明确结果: %s" % brief(out, 200))
+        for status, path in res:
+            lines.append("  临时件 %s（%s）" % (path, DEL_STATUS_CN.get(status, status)))
+    else:
+        out = _exec_cmd(name, sess, _sh_del_cmd(targets, typ), timeout)
+        res = _parse_del_out(out)
+        if not res:
+            raise ToolError("远端删除命令没回明确结果: %s" % brief(out, 200))
+        for status, path in res:
+            lines.append("  临时件 %s（%s）" % (path, DEL_STATUS_CN.get(status, status)))
+
+    # 清完把残留清单同步掉，避免下次又拿旧清单去删
+    with _store_lock:
+        store = _load_store()
+        cur = store.get(name)
+        if isinstance(cur, dict):
+            cur["artifacts"] = [p for p in (cur.get("artifacts") or [])
+                                if isinstance(p, str) and p.strip() and p in targets]
+            _save_store(store)
+    return lines
+
+
 def _purge_remote(name, sess, timeout, explicit_path=""):
     """删远端落地物（马文件 + shell_upload 残留）。
 
@@ -1505,21 +1644,31 @@ def _purge_remote(name, sess, timeout, explicit_path=""):
 def tool_shell_del(args):
     name = req_str(args, "name", "会话名")
     timeout = as_int(args.get("timeout"), 30, 1, 600)
-    # 默认只摘登记，不动远端：要不要清痕迹由人决定，工具不替人做主
+    # 三个动作彼此独立：
+    #   clean_uploads（默认 true）：只删本会话 shell_upload 的远端残留——那是 agent
+    #       自己上传的分析用临时探针/脚本，收尾时该清。
+    #   remove_remote：删远端落地马（连同上传残留），需人工授权。
+    #   drop_registration：摘掉本机登记（页面 WebShell 功能页里就看不到了），
+    #       同样需人工授权——登记摘了现场就没了，等于自毁。
+    # 默认什么都不传 = 只清分析用临时文件，马文件与本机登记都保留。
+    clean_uploads = bool(args.get("clean_uploads", True))
     remove_remote = bool(args.get("remove_remote") or False)
+    drop_registration = bool(args.get("drop_registration") or False)
     force = bool(args.get("force") or False)
     explicit = (opt_str(args, "path", "") or "").strip()
-    # 人工授权闸：光传 remove_remote=true 不够，还要 human_approved=true。
+    # 人工授权闸：光传 remove_remote / drop_registration 不够，还要 human_approved=true。
     # agent 常按旧计划正文（"验证后删马并核验 404"）自删远端，把口子堵在这里，
-    # 删不删远端就真的由人说了算。
+    # 删不删远端、摘不摘登记就真的由人说了算。
     human_approved = bool(args.get("human_approved") or False)
-    if remove_remote and ALLOW_REMOTE_DELETE and not human_approved:
+    if (remove_remote or drop_registration) and ALLOW_REMOTE_DELETE and not human_approved:
+        what = "删目标上的远端马文件" if remove_remote else "摘掉本机登记"
         raise ToolError(
-            "远端删除需要人工授权，已拒绝执行（远端文件未动，本机登记也保留）。\n"
-            "删不删目标上的文件由人决定，agent 不能自己清场。\n"
-            "如确实要清远端：人工在 WebShell 功能页删，或由操作人明确授权后\n"
-            "传 remove_remote=true 且 human_approved=true。\n"
-            "只想摘掉本机登记、不动目标：去掉 remove_remote 即可。"
+            "%s需要人工授权，已拒绝执行（远端文件未动，本机登记也保留）。\n"
+            "删不删目标上的文件、摘不摘登记，由人决定，agent 不能自己清场。\n"
+            "如确实要清：人工在 WebShell 功能页删，或由操作人明确授权后\n"
+            "传 remove_remote=true 且 human_approved=true（要只摘登记不删远端则传\n"
+            "drop_registration=true 且 human_approved=true）。\n"
+            "只想清本次分析上传的临时探针：什么都不传即可（默认行为）。" % what
         )
 
     with _store_lock:
@@ -1532,9 +1681,16 @@ def tool_shell_del(args):
     self_gone = None
     self_path = explicit or (sess.get("remote_path") or "")
 
-    if not remove_remote:
-        report.append("  远端: 未动（remove_remote 未开启，马文件与上传残留都还在目标上）")
-    else:
+    # ① 清分析用临时上传残留（不动马文件）
+    if clean_uploads:
+        try:
+            lines = _purge_uploads(name, sess, timeout)
+            report.extend(lines)
+        except ToolError as e:
+            report.append("  临时件清理失败: %s" % e)
+
+    # ② 删远端落地马（需人工授权）
+    if remove_remote:
         try:
             lines, self_gone, self_path = _purge_remote(name, sess, timeout, explicit)
             report.extend(lines)
@@ -1548,29 +1704,40 @@ def tool_shell_del(args):
             _MODE_CACHE.pop(name, None)
         raise ToolError(
             "远端还没删干净，会话登记已保留（用 shell_list 可复查）:\n%s\n"
-            "处理建议: ① shell_exec 手动确认路径后用 shell_exec 删（如 cmd=\"rm -f /path\"）；"
-            "② 若该会话本来就只想丢弃登记（马留给后续人工清理），传 force=true。"
+            "处理建议: ① 人工在 WebShell 功能页删（可勾选「同时删除远端文件」）；"
+            "② 若该会话本来就只想丢弃登记（马留给后续人工清理），"
+            "传 drop_registration=true 且 human_approved=true。"
             % "\n".join(report))
 
-    with _store_lock:
-        store = _load_store()
-        removed = store.pop(name, None)
-        _save_store(store)
-        remain = len(store)
-    with _cache_lock:
-        _MODE_CACHE.pop(name, None)
+    # ③ 摘本机登记（需人工授权）
+    remain = None
+    removed = None
+    if drop_registration:
+        with _store_lock:
+            store = _load_store()
+            removed = store.pop(name, None)
+            _save_store(store)
+            remain = len(store)
+        with _cache_lock:
+            _MODE_CACHE.pop(name, None)
 
-    log("shell_del %s type=%s remove_remote=%s gone=%s 剩余 %d 个会话"
-        % (name, (removed or {}).get("type"), remove_remote, self_gone, remain))
+    log("shell_del %s type=%s clean_uploads=%s remove_remote=%s drop_registration=%s "
+        "gone=%s 剩余 %s 个会话"
+        % (name, (removed or sess).get("type"), clean_uploads, remove_remote,
+           drop_registration, self_gone, remain if remain is not None else "?"))
 
-    head = ["已删除会话: %s（类型 %s）" % (name, (removed or {}).get("type") or "?")]
+    head = ["已处理会话: %s（类型 %s）" % (name, (removed or sess).get("type") or "?")]
     head.extend(report)
-    head.append("  本机登记: 已从 %s 移除，剩余 %d 个会话" % (STORE_PATH, remain))
+    if drop_registration:
+        head.append("  本机登记: 已从 %s 移除，剩余 %d 个会话" % (STORE_PATH, remain))
+    else:
+        head.append("  本机登记: 保留（仍在 %s，WebShell 功能页可见）" % STORE_PATH)
     if remove_remote:
-        head.append("  痕迹说明: 远端马文件与 shell_upload 残留已按上述结果处理；"
+        head.append("  痕迹说明: 远端马文件已按上面结果处理；"
                     "本机 shell 历史里的命令记录不会自动删，需要的话自己清理。")
     else:
-        head.append("  痕迹说明: 只注销了本机登记，远端马仍可用；需要清痕迹时显式传 remove_remote=true。")
+        head.append("  痕迹说明: 远端落地马未动（马与登记都留着，等人决定）；"
+                    "只清了本次分析上传的临时探针。")
     return ("\n".join(head)), False
 
 
@@ -1909,6 +2076,8 @@ TOOLS = [
             "遇到 WAF 拦截页会明确报出而不是当成回显。输出超过 100KB 会截断。"
             "注意：若远端 PHP 用 disable_functions 禁了 system()，会表现为「稳定空回显」，"
             "此时改用 php_raw（代码执行马）或换用其他命令执行函数。"
+            "⚠️ 删本会话已登记的落地马会被拒绝（远端留不留由人决定）："
+            "收尾时用 shell_del 默认行为清掉自己上传的临时探针即可，别 rm 落地马。"
         ),
         "inputSchema": {
             "type": "object",
@@ -1931,7 +2100,8 @@ TOOLS = [
             "php/php_raw 会话用 PHP file_put_contents（不依赖远端 shell）；"
             "jsp/免杀马走 printf+base64 -d（需远端 exec 经 sh）；aspx 走 PowerShell。"
             "上传后会复核字节数，不一致直接报错。"
-            "上传过的远端路径会自动记进会话的上传残留清单，要清痕迹时 shell_del 传 remove_remote=true 才会一并删。"
+            "上传过的远端路径会自动记进会话的上传残留清单，收尾时 shell_del 默认就会清掉它们"
+            "（落地马文件不在此列，永远保留）。"
         ),
         "inputSchema": {
             "type": "object",
@@ -1983,27 +2153,46 @@ TOOLS = [
     {
         "name": "shell_del",
         "description": (
-            "删除会话。默认只摘掉本机登记（/opt/artex/data/webshells.json），远端文件一概不动。"
-            "需要清痕迹时显式传 remove_remote=true（另需人工授权位 human_approved=true），才会："
+            "收尾清理会话。默认行为【只删本次分析上传的临时探针/脚本】"
+            "（shell_upload 的残留），落地马文件与本机登记一律保留——"
+            "远端留不留由人决定，验证完不要自己删马，删了 WebShell 功能页里就点不透了。\n"
+            "要删远端落地马：传 remove_remote=true 且 human_approved=true（人工授权位，"
+            "只能由操作人给出，agent 不得自行置位），会："
             "① 删远端的马文件（php/php_raw 用 PHP unlink 自删，jsp/aspx 用 rm -f / del）；"
-            "② 删该会话 shell_upload 上传过的残留；③ 再请求一次 URL 复查确认打不通；④ 摘登记。"
-            "远端没清干净时报错并保留登记（活着的马不能静默失联），确要丢弃登记传 force=true。"
+            "② 删该会话 shell_upload 上传过的残留；③ 再请求一次 URL 复查确认打不通。\n"
+            "要摘掉本机登记（页面里就看不到了）：传 drop_registration=true 且 human_approved=true。\n"
+            "远端没清干净时报错并保留登记（活着的马不能静默失联）。"
             "命令型马清远端必须知道绝对路径（shell_add 的 remote_path 或本工具的 path）。"
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "name": {"type": "string", "description": "要删除的会话名"},
+                "name": {"type": "string", "description": "要清理的会话名"},
+                "clean_uploads": {
+                    "type": "boolean", "default": True,
+                    "description": (
+                        "是否删除本次分析上传的临时探针/脚本（shell_upload 残留）。"
+                        "默认 true——这是 agent 收尾该清的；落地马文件不在此列，永远保留。"
+                    ),
+                },
                 "human_approved": {
                     "type": "boolean", "default": False,
                     "description": (
-                        "人工授权位。remove_remote=true 且 human_approved=true 才会真删"
-                        "目标上的远端文件；授权只能由操作人给出，agent 不得自行置位。"
+                        "人工授权位。remove_remote 或 drop_registration 还要 human_approved=true "
+                        "才会真删远端文件/摘本机登记；授权只能由操作人给出，agent 不得自行置位。"
                     ),
                 },
                 "remove_remote": {
                     "type": "boolean", "default": False,
-                    "description": "是否连远端文件一起删。默认 false=只摘本机登记；要清痕迹才显式传 true（另需 human_approved）",
+                    "description": "是否连远端落地马一起删（另需 human_approved=true）。默认 false=不动马",
+                },
+                "drop_registration": {
+                    "type": "boolean", "default": False,
+                    "description": (
+                        "是否摘掉本机登记（/opt/artex/data/webshells.json）。"
+                        "摘了 WebShell 功能页里就看不到这个会话了，需 human_approved=true。"
+                        "默认 false=保留登记。"
+                    ),
                 },
                 "path": {
                     "type": "string",

@@ -2,6 +2,41 @@
 
 本项目的重要变更记录在此文件中，格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.3.40] - 2026-11-04
+
+### 攻防模版「验证完就删马」口径冲突的整链修复
+
+**现象**：攻防演练模版里同时写着「禁止植入后门、写入自启动项、添加账号、持久化驻留、
+横向渗透、在内网扩散」和「获取 Shell 仅用于漏洞有效性验证，验证完成后及时清理临时文件」。
+agent 照做，把刚落地的 webshell 删掉，**WebShell 功能页里就看不到那个会话了**。
+
+**根因是三层，逐层堵**：
+
+1. **冲突文本在任务级 goal，不在提示词里**。已改 `task_templates` id=6「攻防演练」与
+   任务 17 的 goal：收尾口径改为「只清分析用临时文件，落地马与本机登记保留」；
+   禁止植入后门/持久化/横向渗透等红线原样保留（那些是行为边界，与「留下证据」不冲突）。
+2. **`Task.Goal` 是内存快照**（`taskFromPG()` 建任务时读一次 PG），改 DB 对运行中任务
+   不生效——改完 goal 任务还在按旧口径派意图。新增 `Manager.RefreshGoal()`：
+   planner 每轮规划前、终局判定、主 agent 每轮对话前都重读 PG 并同步进快照，
+   **改完立即生效，不必重启服务**。`Task` 新增 `goalMu`，`GoalText()`/`SetGoal()`
+   并发安全；所有读 `t.Goal` 的地方统一改走 `GoalText()`。
+3. **工具层两个缺口**（这才是「页面看不到」的直接成因）：
+   - `shell_del` 默认走「只摘本机登记」路径，而 `human_approved` 闸只拦
+     `remove_remote=true`——agent 调一次 `shell_del(name)` 就把登记摘了，页面立刻空。
+     改为：默认**只清 `shell_upload` 上过的临时探针/脚本**（新增 `_purge_uploads`）；
+     删远端马（`remove_remote`）与摘登记（`drop_registration`）**都必须人工授权**。
+   - `shell_exec` 无任何命令过滤，agent 可以 `rm -f /path/shell.php` 或
+     `unlink('/path/shell.php')` 绕开 `shell_del` 的闸。新增落地马路径守卫
+     `_guard_remote_horse_delete`：命中落地马路径、basename、或**父目录整目录删除**
+     （`rm -rf /var/www/html`）都拒绝；父目录匹配用路径成词正则，
+     不误伤 `rm -rf /var/www/html/uploads`。
+
+**注意语义变更**：`shell_del` 默认调用现在**不做任何破坏性动作**。想清远端或摘登记，
+必须在 WebShell 功能页人工操作（或显式传 `human_approved`）。
+
+**验证**：`webshell/test_shell_del_guard.py` 18 项断言全过；
+`webshell/test_shell_del_gate_e2e.py` 起真 MCP stdio 进程走 JSON-RPC 复核。
+
 ## [0.3.39] - 2026-11-04
 
 ### 授权闸补上端到端验证 + 会话库路径可覆盖
