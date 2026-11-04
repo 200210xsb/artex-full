@@ -2,6 +2,36 @@
 
 本项目的重要变更记录在此文件中，格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.3.27] - 2026-11-04
+
+### WebShell：加密载荷 + 随机参数名，落地不再留明文特征
+
+#### 新增
+
+- **内置加密载荷 `php/enc.php`**：核心逻辑用 gzinflate + base64 双层封装，落地文件里
+  只有一段密文；取用时才把参数名与密文拼进去。
+  - 同时兼容两条协议：吃 PHP 代码（eval 型，`shell_exec`/`shell_upload`/`shell_download`
+    直接用），也吃 base64 命令（eval 被禁时的降级通道），两条都实测通过。
+  - 参数名在 `payload_get` 时**随机生成**（8 位，字母+数字，首字符字母），并在输出里
+    回一行 `param=xxxxxxxx`；`shell_add` 的 `password` 填这个值。
+- **`payload_get` 支持 `param` 参数**（MCP 与页面接口 `GET /api/webshell/payloads/{type}/{file}?param=`）：
+  不填则每次随机，填了按指定值；非加密载荷原样返回、不生成参数名。
+- **参数名/文件名反字典**：明文 `eval($_POST['pass'])`、`system(...)` 是 WAF/AV 的固定
+  特征，把参数名固定成 `pass`/`cmd`/`shell` 等于把入口写在旁边。攻防 agent 的提示词
+  （redteam，DB 版本 6）已写明：优先用加密载荷、参数名取返回值、文件名用静态资源样式的
+  随机名（`static_3f9a2c71.php`）而不是 `shell.php`/`1.php`。
+
+#### 实现说明
+
+- `server/webshell.go`：`webshellRenderDynamicPayload` 负责把 `__ARTEX_K__`（参数名）与
+  `__ARTEX_L__`（密文）渲染成可落地的全文；裸 deflate（`compress/flate`）对齐 PHP 的
+  `gzinflate`。
+- `/opt/artex/bin/webshell_mcp.py`：`_render_enc_payload` 同一套逻辑（`zlib` wbits=-15），
+  两侧 inner 逻辑 `webshellEncInner` / `ENC_INNER` **必须逐字一致**，Go 侧测试
+  `TestWebshellRenderDynamicPayload` 会解压密文比对，任一侧漂移即失败。
+- 已用任务 17 的 Xdebug 目标实测：加密马落地 1239 字节、参数名 `dist8kc5`、`shell_exec`
+  回显 `uid=997 gid=997`；同时删除旧的明文马（参数名 `pass`）与其会话记录。
+
 ## [0.3.26] - 2026-11-04
 
 ### 攻防任务：专项 agent 的工具装不到执行端，shell 只验证不落地

