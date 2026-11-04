@@ -273,6 +273,38 @@ func (s *Server) webshellSessionByName(name string) (webshellSession, error) {
 	return sess, nil
 }
 
+// landedShellForExploration 判断本探索的任务资产上是否已有登记的 WebShell 会话。
+// 注入给 agent.ShellSessionLanded：prove_goal 校验 shell 目标时，活动记录里查不到
+// shell_add（页面上手工登记、别的进程调 MCP）也要算数，否则真落了马还被判「没拿到」。
+func (s *Server) landedShellForExploration(explorationID int64) bool {
+	if s == nil || s.m == nil || s.m.pg == nil || explorationID <= 0 {
+		return false
+	}
+	sessions, err := s.webshellAllSessions()
+	if err != nil || len(sessions) == 0 {
+		return false
+	}
+	seen := map[string]bool{}
+	hosts := make([]string, 0, len(sessions))
+	for _, sess := range sessions {
+		u, perr := url.Parse(strings.TrimSpace(sess.URL))
+		if perr != nil {
+			continue
+		}
+		h := u.Hostname()
+		if h == "" || seen[h] {
+			continue
+		}
+		seen[h] = true
+		hosts = append(hosts, h)
+	}
+	if len(hosts) == 0 {
+		return false
+	}
+	ok, err := s.m.pg.Exploration(explorationID).HasLandedShellSession(hosts)
+	return err == nil && ok
+}
+
 func (s *Server) webshellAllSessions() (map[string]webshellSession, error) {
 	webshellStoreMu.Lock()
 	defer webshellStoreMu.Unlock()
