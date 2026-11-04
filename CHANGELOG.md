@@ -2,6 +2,28 @@
 
 本项目的重要变更记录在此文件中，格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.3.30] - 2026-11-04
+
+### 修前端更新不生效：静态资源缓存头用错了
+
+#### 修复的问题
+
+- **改了页面看不到**：`_next/static/**` 一直按 `public, max-age=31536000, immutable`
+  下发，理由是「Next 导出的文件名带内容哈希」。实际上这些 chunk 名（如
+  `1lhy4egkrgoto.js`）是构建期生成的**稳定 ID**，不是内容哈希——同一个文件名在两次
+  构建之间内容会变。于是前端更新后浏览器继续用一年前缓存下来的旧 chunk，页面上
+  看不到任何新功能（0.3.29 的「同时删除远端文件」勾选就是这么被吃掉的）。
+- 改法：`_next/static/**` 改为 `no-cache, must-revalidate`（回源命中 304，代价很小）；
+  HTML 响应也改成 `no-cache`，并在返回前给里面的 `/_next/static/*.js|css` 引用补上
+  `?v=<BuildVersion>`。URL 变了浏览器才会重新拉取，这样每次发布自动失效老缓存，
+  用户不用手动强刷。
+
+#### 实测
+
+- `GET /_next/static/chunks/1lhy4egkrgoto.js` → `Cache-Control: no-cache, must-revalidate`。
+- `GET /function/webshell` 的 HTML 里引用变成 `1lhy4egkrgoto.js?v=0.3.30`，该 chunk
+  内容含 0.3.29 新增的删除勾选代码，普通刷新即可看到。
+
 ## [0.3.29] - 2026-11-04
 
 ### 会话删除可选清远端 + 载荷不再自带说明书
