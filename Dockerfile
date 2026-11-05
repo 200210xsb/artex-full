@@ -64,6 +64,8 @@ COPY --from=gobuild /out/artex /app/artex
 COPY start.sh /app/start.sh
 RUN chmod +x /app/artex /app/start.sh
 COPY skills/ /app/skills/
+# MCP 工具链脚本（不进镜像自动注册：容器里按 mcp/README.md 执行 install-mcp.sh 即可）
+COPY mcp/ /app/mcp/
 # data/（SQLite + jwt.key）持久化点
 VOLUME ["/app/data"]
 EXPOSE 8787 8788

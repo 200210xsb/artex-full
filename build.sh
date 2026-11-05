@@ -161,6 +161,23 @@ compress_binary() {
   ok "UPX 压缩完成：$binary (${before} -> ${after} bytes)"
 }
 
+# 只把 git 跟踪的文件拷进发布包：排除 __pycache__、本地测试产物与临时件。
+copy_tracked() {  # $1=源目录 $2=目标父目录 $3=目标子目录名
+  src="$1"
+  dest="$2"
+  sub="$3"
+  mkdir -p "$dest"
+  # git archive 只认已跟踪的文件；目录还没提交（或根本没有 git）时退回 tar 拷贝。
+  # 两条路径都用 --prefix / 显式子目录，保证解出来的层级一致（否则会出现
+  # 「有的目录带前缀、有的不带」的扁平混合结构）。
+  if git rev-parse --git-dir >/dev/null 2>&1 \
+     && git archive --format=tar --prefix="$sub/" "$src" 2>/dev/null | tar -xf - -C "$dest" 2>/dev/null; then
+    return 0
+  fi
+  mkdir -p "$dest/$sub"
+  (cd "$src" && tar -cf - --exclude=__pycache__ --exclude='*.pyc' .) | tar -xf - -C "$dest/$sub"
+}
+
 package_binary() {
   binary="$1"
   goos="$2"
@@ -182,6 +199,13 @@ package_binary() {
     chmod +x "$package_root/start.sh"
   fi
   cp -R skills "$package_root/"
+  # MCP 工具链：脚本 + payload 库一共几百 KB，随包发；nuclei/subfinder 二进制约 200 MB，
+  # 由包内 mcp/install-mcp.sh 按需下载，避免把 Release 撑大。
+  copy_tracked mcp "$package_root" mcp
+  for tool in nuclei recon webshell oob webpath; do
+    [ -d "$tool" ] && copy_tracked "$tool" "$package_root/mcp" "$tool"
+  done
+  find "$package_root/mcp" -name '*.sh' -exec chmod +x {} + 2>/dev/null || true
   cp config.example.json "$package_root/"
   if [ -f README.md ]; then cp README.md "$package_root/"; fi
   (cd "$ARTEX_PACKAGE_DIR" && zip -q -r -9 "$(basename "$archive")" "$(basename "$package_root")")

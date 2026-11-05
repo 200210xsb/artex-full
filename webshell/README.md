@@ -49,3 +49,20 @@ python3 -c "import py_compile;py_compile.compile('/opt/artex/bin/webshell_mcp.py
 
 改完不用重启 ARTEX：MCP 子进程随 worker 生命周期起落，下一轮任务就是新代码；
 页面侧（`server/webshell.go`）改动才需要重新编译部署。
+
+## payload 库不随仓库 / Release 分发
+
+本目录只放 MCP 服务端脚本与注册脚本；`payloads/webshell/<php|jsp|aspx>/` 下的内置马
+**不入库、也不进 Release 包**（避免公开分发可直接落地的载荷）。用自己的 payload 即可：
+
+```bash
+# 放到运行时数据目录，路径与 server/webshell.go 读取的一致
+mkdir -p /opt/artex/payloads/webshell/php
+cp your_shell.php /opt/artex/payloads/webshell/php/
+
+# 或用环境变量把 MCP 指到别处（Go 侧页面同样认这个变量）
+export ARTEX_WEBSHELL_PAYLOAD_DIR=/srv/payloads/webshell
+```
+
+`payload_list` / `payload_get` 会按文件头注释里的 `@summary / @scene / @param` 元信息
+渲染清单与参数说明，没有元信息也能列出，只是描述为空。

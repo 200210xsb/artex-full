@@ -1,0 +1,53 @@
+{
+  "comment": "内置任务模版种子：首次启动幂等写入，之后用户改动/删除不会被覆盖（settings.task_templates_seed_v1 置位后不再播种）。",
+  "templates": [
+    {
+      "name": "移动端 APP 测试",
+      "nkey": "mobile_app",
+      "description": "Android 真机纳管 + 目标 app 动态测试",
+      "goal": "先 device_list 确认设备在线并看 root 状态；device_apps 定位目标应用，device_app_info 取安装路径；device_url_open 拉起；device_screenshot/device_ui 记录关键页面；有 root 时 device_proxy 接记录代理 + device_capture_* 抓包；无 root 时只用截图/文件/应用管理，并在结论里说明抓包不可用。\n\n【WAF 管控】抓包与代理探测期间监控 WAF 告警；出现拦截/封禁提示立即降速或停手，必要时改用编码变形 payload；不要用高频请求硬冲。\n【业务无损】只做只读验证：禁止删除、修改 app 数据与业务配置；不触发下单、支付、删除、授权等会改变业务状态的操作；设备上不要安装/卸载业务应用或改动其配置。",
+      "agent_key": null,
+      "intercept_rules": []
+    },
+    {
+      "name": "小程序专项",
+      "nkey": "miniprogram",
+      "description": "Burp 抓包 + wxapkg 反编译，找接口与越权",
+      "goal": "工作区里已放好小程序反编译产物。步骤：1) 读工作目录下的小程序反编译文件夹（app.json / app-service.js），列出后端域名、接口路径、appid、硬编码密钥；2) 用 mini_open 或 device_url_open 在真机拉起小程序，操作几轮让流量进 Burp；3) 用 mcp__Burp__get_proxy_http_history_regex 按域名/路径从 Burp 现取请求（不用改 Burp 上游），用 get_scanner_issues 看已有问题；4) 对反编译里找到的接口用 mcp__Burp__send_http1_request 重放、改参数、去鉴权，验证未授权/越权/参数篡改；5) SSRF/XXE 用 mcp__Burp__generate_collaborator_payload + get_collaborator_interactions 验证；6) 每个结论附请求响应证据并 report_finding。\n\n【WAF 管控】探测全程监控 WAF 告警；触发预警（拦截页/429/封禁提示）立即降低请求频率、精简 Payload、暂停一段时间再继续；用编码变形（URL/双层编码、base64、拆词拼接）规避 IP 封禁；Burp 侧看到拦截页要停手降速，不要反复重试同一请求。\n【业务无损】只做只读验证：禁止删除、修改、覆盖业务数据、业务配置与线上代码；不要触发下单/支付/删除等会改变业务状态的操作；上传的临时文件记录路径并在收尾删除。",
+      "agent_key": null,
+      "intercept_rules": []
+    },
+    {
+      "name": "Web 渗透",
+      "nkey": "web 渗透",
+      "description": "标准 Web/API 测试",
+      "goal": "任务：读取资产清单提取测试目标，执行Web指纹识别、敏感路径探测；同步逆向站点JS代码，解析后端接口、请求参数、加密算法与签名校验逻辑。仅对以下高危漏洞开展无损验证：SQL注入、核心敏感信息未授权访问、任意文件读取、可执行文件上传、SSRF、可利用XSS。\n\n【强制测试约束】\n1. 无损测试原则：禁止新增、修改、删除、覆盖业务数据，禁止写入脏数据，禁止使用DoS、破坏性Payload，所有探测动作不得对业务造成影响。\n2. WAF防护适配：探测全程关注WAF告警与拦截行为，触发告警时自动降低请求频率、精简Payload，规避源IP封禁。\n3. 敏感凭证处置规则：JS逆向捕获到密钥、签名密钥、Token等凭证，不单独作为漏洞输出；仅当凭证可配合漏洞形成完整可复现利用链时，才合并写入漏洞详情。\n4. 证据要求：所有输出漏洞条目，必须一一附带原始HTTP请求包、响应数据包作为复现证据。\n5. 告警过滤规则：自动丢弃无实际利用价值的告警，不输出低危、无效中危；过滤项包含但不限于：版本指纹泄露、HTTP安全头缺失、robots.txt静态目录泄露、无法带出数据的无回显盲注、自包含无交互XSS、纯信息提示类告警。\n\n【Artex输出格式约束】\n严格遵循Artex报告模板结构输出；漏洞定级只保留高危/严重，不生成低危、无效中危；每条漏洞包含：漏洞名称、影响资产、风险描述、利用条件、复现步骤、原始请求包、原始响应包、修复建议；不额外输出无关闲聊、过程日志。",
+      "agent_key": null,
+      "intercept_rules": []
+    },
+    {
+      "name": "EXE 客户端测试",
+      "nkey": "exe_test",
+      "description": "Windows 客户端抓流量、看配置与更新通道",
+      "goal": "把目标 exe 放进工作区，静态看导入表/字符串/签名；运行时抓它出网的流量（走记录代理），找更新地址与硬编码凭据；验证提权面与持久化位置。",
+      "agent_key": null,
+      "intercept_rules": []
+    },
+    {
+      "name": "资产测绘同步",
+      "nkey": "asset_sync",
+      "description": "ScopeSentry 扫描结果同步进 ARTEX",
+      "goal": "在 ScopeSentry 跑完一轮测绘后，用资产同步拉项目/任务资产进 ARTEX；核对公司/资产归属，再按资产建立覆盖面。",
+      "agent_key": null,
+      "intercept_rules": []
+    },
+    {
+      "name": "攻防演练",
+      "nkey": "攻防演练",
+      "description": "攻防演练",
+      "goal": "任务：从资产列表提取目标，执行指纹识别、路径探测，同步对站点JS逆向分析接口、参数、加密与签名逻辑；针对RCE、命令注入漏洞开展攻防验证，可尝试获取Shell。\n\n强制约束：\n1. 操作边界：禁止删除、篡改、覆盖业务数据，禁止DoS攻击；允许使用回显、信息收集类Payload、短期临时Shell；**禁止植入后门、写入自启动项、添加账号、持久化驻留、横向渗透、在内网扩散**；获取Shell仅用于漏洞有效性验证，**用途限于验证，不等于验证完就删**：落地的 webshell 与其 shell_add 登记一律保留（写清落地路径），由人在 WebShell 功能页决定何时删除、是否连远端一起删；只有为分析临时上传的探针/脚本才在收尾时删掉。\n2. WAF管控：探测全程监控WAF告警，触发预警时降低请求频率、精简Payload，采用编码变形规避IP封禁。\n3. 敏感凭证处置：JS逆向识别到密钥、token、签名密钥等凭证时，不单独输出密钥类漏洞结论；仅当该凭证可结合RCE/命令注入形成完整可复现利用链（含拿到Shell）时，才一并纳入漏洞结论。\n4. 证据强制要求：每一条RCE/命令注入漏洞结论，必须附带一一对应的原始HTTP请求包、响应数据包作为复现证据；Shell获取过程关键报文一并留存。\n5. 输出约束：仅输出可成功执行命令、可稳定获取Shell的有效RCE/命令注入漏洞；过滤误报、无回显、无法带出结果、无法拿到Shell的无效告警，不输出其他类型漏洞。\n\n输出遵循Artex报告模板结构，漏洞定级为严重/高危，字段包含：漏洞名称、影响资产、风险描述、利用条件、复现步骤、原始请求包、原始响应包、修复建议，不输出无关日志与闲聊内容。\n\n【拿到 Shell 之后】\n用 mcp__Webshell__shell_add 登记（type: php/php_raw/jsp/aspx，password 为马子参数名），之后一律用 shell_exec 操作：\n1) 探环境：id / whoami / hostname / uname -a / pwd\n2) 摸边界：ls -la 当前目录，找 .env、.git、配置文件、数据库连接串\n3) 取证据：每条结论附命令与回显原文，用 report_finding 记录\n4) 文件：需要分析用 shell_download 拉回工作区；shell_upload 仅在必要时用并记录路径\n收尾：**只删除本次为分析临时上传的探针/脚本**（删不掉的写明路径与原因）；**落地的 webshell 及其 shell_add 登记保留不删**——它要留在 WebShell 功能页里供人复查、复测，落地路径写进报告。禁止后门、自启动、加账号、持久化、横向、删改业务数据。\n\n【怎么拿 Shell（三条路，按可行性选）】\n1) 文件上传 / RCE：payload_list 按目标类型（php/jsp/aspx）与 WAF 强度挑变体 → payload_get 取全文 → 通过上传点落地（记录落地路径）→ shell_add 登记 → shell_exec 验证回显（id/whoami）\n2) SQLi 写文件：确认有 FILE 权限与可写目录（secure_file_priv、@@basedir/@@datadir）→ 用 INTO OUTFILE/DUMPFILE 写马 → 落地后用 shell_add 登记；写不进去就说明原因，不要反复尝试\n3) 日志包含：确认可读写日志路径（Apache/Nginx access.log、MySQL general_log）→ 把马写进日志 → 包含执行 → shell_add 登记\n三条路都不通时，明确记录「未取得 shell」及卡点，不要伪造。\n【没有上传点/RCE 时不要硬试】payload_* 只在存在落地条件时才有意义。\n\n【按指纹自动匹配 POC（仅本模板启用）】\n1) 用 mcp__Nuclei__fingerprint_probe 对目标探测指纹\n2) 用 mcp__Nuclei__poc_match 按指纹反查候选 POC（默认 limit=50，只含 high 以上且与 rce/上传/反序列化/命令注入/SQLi 相关）\n3) 用 mcp__Nuclei__poc_auto_run 验证（限速默认 50/s，最多 50 个模板；不要扩大范围）\n4) 命中即 report_finding；命中 RCE/上传类时按 WebShell 流程落马拿 shell\n5) 未匹配到 POC 时明确说明，不要盲扫全库模板\n\n【收尾清理口径（与前面「用途限于验证」不冲突，务必分清）】\n- **要删的**：本次为分析临时上传的探针/脚本/中间件——收尾时删掉，删不掉的写明路径与原因。\n- **不要删的**：落地的 webshell 文件，以及它的 shell_add 登记——**一律保留**。\n  理由：落地马是漏洞有效性的成果载体，删了就没法复测；保留它，\n  人才能在 WebShell 功能页里看到会话、复测、决定何时清理。\n  你只负责把落地路径写进报告并说明用途，**不要自行删除落地马**。\n  真要删时由人在页面上操作：默认只摘本机登记，勾选「同时删除远端文件」才动目标上的文件。\n\n【Shell 操作红线与踩坑（最高优先级）】\n一、不影响业务（不可协商）\n- 只读优先：先 id / whoami / pwd / ls / cat 读配置，确认环境后再考虑写操作\n- 绝对禁止删除、修改、覆盖任何业务数据：业务文件、数据库表与记录、业务配置、线上日志、业务目录内的任何东西\n- 禁止影响业务可用性：不得重启服务、部署、kill 业务进程、清缓存、占用端口、压测式并发\n- 写操作只允许落在一次性临时目录（如 /tmp）或你本次上传的落地路径；每次写之前先记录路径。收尾时删掉**分析用的临时件**，但**落地验证用的 webshell 保留**（那是成果载体，要让人在页面上看到并复查）\n- 禁止危险命令：rm -rf、chmod -R、chown -R、kill -9、dd、mkfs、truncate、drop、> 覆盖重定向到业务文件\n- 上传前确认目标路径不存在同名文件；若存在，改名加时间戳，不要覆盖\n- 宁可停下来报告，也不要冒业务数据不可回滚的风险\n二、执行纪律\n- 命令单条、幂等；不要交互式命令（vi/top/less/tail -f），用 cat / sed -n / head\n- 禁止 rm -rf *、禁止通配符批量删除\n- 回显为空先怀疑编码、裁剪或马型不匹配，换 payload_get 的其它变体（bypass1 / bypass2 / callback）再试，不要臆断失败\n- 命令型马（jsp/aspx）的上传下载依赖远端 sh / PowerShell，不支持时会明确报错，不要反复重试\n- 超时或失败如实记录卡点，不要高频重试，避免 WAF 封禁源 IP\n- 落地马路径、临时文件路径必须写进报告，便于人复核与后续清理（清理由人决定，你只负责写清路径；不要自行删除落地马）",
+      "agent_key": "redteam",
+      "intercept_rules": []
+    }
+  ]
+}

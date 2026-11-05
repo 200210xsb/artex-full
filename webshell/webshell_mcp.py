@@ -60,11 +60,18 @@ import zlib
 SERVER_NAME = "Webshell"
 SERVER_VERSION = "1.0.0"
 
-DATA_DIR = "/opt/artex/data"
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+# 数据目录：环境变量 > 传统安装位 /opt/artex/data > 解压目录同级 data/。
+# 会话库是 Go 侧（server/webshell.go）与这里共用的，两边必须指同一个文件。
+DATA_DIR = (os.environ.get("ARTEX_DATA_DIR") or "").strip() or (
+    "/opt/artex/data" if os.path.isdir("/opt/artex/data")
+    else os.path.join(os.path.dirname(_SCRIPT_DIR), "data")
+)
 # 会话库与日志路径允许用环境变量覆盖：默认仍是生产路径，但端到端测试（起真 MCP
 # 进程走 JSON-RPC 调工具）需要指向临时库——直接用真库会动生产数据。
 STORE_PATH = (os.environ.get("ARTEX_WEBSHELL_STORE") or "").strip() or (DATA_DIR + "/webshells.json")
-LOG_PATH = (os.environ.get("ARTEX_WEBSHELL_LOG") or "").strip() or "/var/log/webshell-mcp.log"
+_STATE_DIR = "/var/log" if os.access("/var/log", os.W_OK) else tempfile.gettempdir()
+LOG_PATH = (os.environ.get("ARTEX_WEBSHELL_LOG") or "").strip() or os.path.join(_STATE_DIR, "webshell-mcp.log")
 
 # 人工授权闸：agent 侧 shell_del 要删目标上的远端文件时，除了 remove_remote=true
 # 还必须带 human_approved=true。页面（WebShell 功能页）里人工点的删除走 Go 侧
@@ -162,7 +169,22 @@ def _guard_remote_horse_delete(name, sess, cmd):
 VALID_TYPES = ("php", "php_raw", "jsp", "aspx")
 
 # 内置 payload 库：<根目录>/<type>/<file>，payload_get 只允许访问这下面
-PAYLOAD_DIR = "/opt/artex/payloads/webshell"
+def _resolve_payload_dir():
+    """payload 库位置：环境变量 > 可执行文件同级 > 传统安装位。"""
+    env = os.environ.get("ARTEX_WEBSHELL_PAYLOAD_DIR")
+    if env:
+        return env
+    for path in (
+        os.path.join(_SCRIPT_DIR, "payloads", "webshell"),
+        os.path.join(os.path.dirname(_SCRIPT_DIR), "payloads", "webshell"),
+        "/opt/artex/payloads/webshell",
+    ):
+        if os.path.isdir(path):
+            return path
+    return "/opt/artex/payloads/webshell"
+
+
+PAYLOAD_DIR = _resolve_payload_dir()
 PAYLOAD_TYPES = ("php", "jsp", "aspx")
 # 文件头注释里的元信息标签：@summary / @scene / @perm / @bypass / @param / @mcp
 PAYLOAD_META_RE = re.compile(r"@(summary|scene|perm|bypass|param|mcp)\s+(.+)")

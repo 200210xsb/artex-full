@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	_ "embed"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
@@ -19,6 +20,12 @@ import (
 
 //go:embed schema.sql
 var schemaSQL string
+
+// 内置任务模版种子。放在代码里而不是只留在库里：新部署（尤其是从 Release
+// 解压的二进制）开箱就该有这几个常用模版，否则用户面对的是空列表。
+//
+//go:embed task_templates_seed.json
+var taskTemplatesSeedJSON string
 
 const schemaMigrationLockKey int64 = 7337741001
 
@@ -162,6 +169,9 @@ func Open(dsn string) (*DB, error) {
 		}
 		if err := d.seedBuiltins(); err != nil {
 			return fmt.Errorf("seed builtins: %w", err)
+		}
+		if err := d.seedTaskTemplates(); err != nil {
+			return fmt.Errorf("seed task templates: %w", err)
 		}
 		return nil
 	})
@@ -664,4 +674,46 @@ WHERE NOT EXISTS (SELECT 1 FROM intercept_rules WHERE name = $1)`,
 		return fmt.Errorf("rule %q: %w", name, err)
 	}
 	return d.SetSetting("intercept_default_rules_v3", "done")
+}
+
+// seedTaskTemplates 播种内置任务模版，只在首次初始化时执行一次。
+//
+// 为什么带一次性标记而不是每次启动都 INSERT ... ON CONFLICT DO NOTHING：
+// 用户可能删掉某个内置模版（或改名），下次重启不该把它又塞回来。
+// 标记写进 settings，播种成功后置位，之后无论怎么重启都不再碰这张表。
+func (d *DB) seedTaskTemplates() error {
+	if v, _, _ := d.GetSetting("task_templates_seed_v1"); v == "true" {
+		return nil
+	}
+	var seed struct {
+		Templates []struct {
+			Name           string          `json:"name"`
+			NKey           string          `json:"nkey"`
+			Description    string          `json:"description"`
+			Goal           string          `json:"goal"`
+			AgentKey       *string         `json:"agent_key"`
+			InterceptRules json.RawMessage `json:"intercept_rules"`
+		} `json:"templates"`
+	}
+	if err := json.Unmarshal([]byte(taskTemplatesSeedJSON), &seed); err != nil {
+		return fmt.Errorf("parse task_templates_seed.json: %w", err)
+	}
+	for _, t := range seed.Templates {
+		rules := strings.TrimSpace(string(t.InterceptRules))
+		if rules == "" || rules == "null" {
+			rules = "[]"
+		}
+		agentKey := ""
+		if t.AgentKey != nil {
+			agentKey = *t.AgentKey
+		}
+		if _, err := d.Exec(`
+INSERT INTO task_templates(name, nkey, description, goal, agent_key, intercept_rules)
+VALUES ($1, $2, $3, $4, NULLIF($5, ''), $6::jsonb)
+ON CONFLICT (nkey) DO NOTHING`,
+			t.Name, t.NKey, t.Description, t.Goal, agentKey, rules); err != nil {
+			return fmt.Errorf("seed task template %s: %w", t.NKey, err)
+		}
+	}
+	return d.SetSetting("task_templates_seed_v1", "true")
 }

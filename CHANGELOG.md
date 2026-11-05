@@ -2,6 +2,54 @@
 
 本项目的重要变更记录在此文件中，格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.4.0] - 2026-11-05
+
+### 外挂 MCP 工具链进包：解压即可补齐扫描 / 拿 shell 能力
+
+**背景**：ARTEX 一直是「单二进制 + 外挂 MCP」的设计。但在此之前，五个 MCP
+（Nuclei / Subfinder / Webshell / WebPath / OOB）只存在于作者自己的机器上——
+从 Release 解压出来的是一个能开、能建任务、能对话，却**没有扫描与拿 shell 工具**的空壳。
+
+**本次把这条缺口补上**：
+
+1. **新增 `nuclei/` 与 `recon/`**：`nuclei_mcp.py`（9 个工具）与 `recon_mcp.py`
+   （5 个工具）首次入库，各带 `register-mcp.sh` 与 README。
+2. **`webshell/` 补齐注册脚本**：此前该 MCP 没有注册脚本，只能手工写 SQL；本次补上
+   `webshell/register-mcp.sh`，并把 `webshell_mcp.py` 的 payload / 会话库 / 日志目录改成可解析。
+   **payload 库（可直接落地的马）不入库、不随 Release 分发**，由使用者自备；
+   MCP 脚本本身随包，页面与 MCP 的会话管理功能开箱可用。
+3. **新增 `mcp/install-mcp.sh`**：一条命令铺脚本 → 按需下载 nuclei / subfinder /
+   模板库 → 生成 provider-config 模板 → 注册进数据库并授权全部 agent；支持离线、
+   指定安装目录、国内镜像基址与 `--dry-run`。
+4. **五个 MCP 的路径全部可移植**：二进制 / 模板 / 字典 / 日志 / 索引统一为
+   「环境变量 > 脚本同级 > 传统安装位 `/opt/artex` > `PATH`」；日志与索引在只读
+   挂载下自动退到临时目录——解压到任意目录都能跑起来。
+5. **Release 包结构变化**：zip 内新增 `mcp/` 树（五个 MCP 的脚本 + 注册脚本 + README，
+   约 300 KB）；`build.sh` 改用 `git archive` 只打包跟踪文件，避免把 `__pycache__` 带进去。
+   **webshell 的 payload 库不进包**：那是可直接落地的载荷，不适合随公开发行版分发；脚本随包，
+   payload 由使用者自备。
+
+### 任务模版内置：新库不再从空列表开始
+
+任务模版此前只存在数据库里（`task_templates` 表），新部署拿到的是空列表。现在把
+6 个常用模版（移动端 APP / 小程序专项 / Web 渗透 / EXE 客户端 / 资产测绘同步 /
+攻防演练）做成 `db/task_templates_seed.json`，用 `go:embed` 编进二进制，首次初始化播种：
+
+- **幂等**：`ON CONFLICT (nkey) DO NOTHING`，库里已有的同名模版不覆盖；
+- **只播一次**：成功后写 `settings.task_templates_seed_v1`，之后重启不再碰这张表——
+  用户删掉或改名的模版不会被塞回来；
+- 「攻防演练」带 `agent_key=redteam`，用该模版建任务会自动落到红队 agent。
+
+**验证**：临时空库启动 → 6 条模版全部写入（`攻防演练` 的 agent_key 正确为 redteam）、
+agents 9 / agent_prompts 9 / mcp_servers 2 与预期一致、播种标记置位；`go build ./...` 通过。
+
+### 其它
+
+- `Dockerfile` 增加 `COPY mcp/ /app/mcp/`，容器内可按 `mcp/README.md` 就地安装。
+- 主 README 新增「MCP 工具链」章节，讲清装与不装的差别。
+- `webshell/register-mcp.sh` 新增（不随包分发的部分见上）。
+- README「方式三」重写为七步部署流程（PG → 解压 → config → 启动 → LLM → MCP → 验证）。
+
 ## [0.3.40] - 2026-11-04
 
 ### 攻防模版「验证完就删马」口径冲突的整链修复

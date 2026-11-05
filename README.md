@@ -96,17 +96,78 @@ docker compose up -d          # 启动 artex + postgres
 `/message?sessionId=...` 接收 JSON-RPC 请求；配置时将 URL 填为 `/sse`，请求头按
 `Authorization=Bearer <token>` 填写。
 
-### 方式三：下载预编译二进制（Releases）
+### 方式三：下载预编译二进制（Releases，最快，约 10 分钟）
 
-到本仓库 [Releases](https://github.com/200210xsb/artex-full/releases) 下载对应平台的 zip：解压后得到 `artex` + `start.sh`（Windows 为 `start.bat`）+ `skills/` + `config.example.json`：
+包里有：`artex`、`start.sh`（Windows 为 `start.bat`）、`skills/`、`config.example.json`、`mcp/`（外挂 MCP 工具链）。
+
+**第 1 步 · 准备 PostgreSQL 16+**（ARTEX 不内嵌数据库）
 
 ```bash
-cp config.example.json config.json   # 填好 database 连接
-./start.sh                           # → http://localhost:8787
+# 已有 PG 就跳过。没有的话用 Docker 起一个：
+docker run -d --name artex-pg --restart unless-stopped \
+  -e POSTGRES_USER=artex -e POSTGRES_PASSWORD='换成你的密码' -e POSTGRES_DB=artex \
+  -p 127.0.0.1:5432:5432 -v artex-pgdata:/var/lib/postgresql/data postgres:16-alpine
 ```
 
-> 请用 `start.sh` / `start.bat` 启动，而不是直接跑 `./artex`。它是个守护脚本：程序退出后按退出码决定是否重新拉起，**页面上的[一键更新](#方式一页面一键更新推荐)靠它完成换装**。直接运行 `./artex` 时更新完就不会被拉起了。
-> 后台常驻：`nohup ./start.sh >artex.log 2>&1 &`。
+**第 2 步 · 下载并解压**
+
+到 [Releases](https://github.com/200210xsb/artex-full/releases) 下载对应平台的 zip：
+
+```bash
+unzip artex-0.4.0-linux-amd64.zip && cd artex-0.4.0-linux-amd64
+chmod +x artex start.sh
+```
+
+**第 3 步 · 写 `config.json`**
+
+```bash
+cp config.example.json config.json
+```
+
+把 `database` 里的 `host / port / user / password / dbname` 改成第 1 步的库；也可以删掉分字段、只留 `database.dsn`
+一个完整连接串。LLM 的 key 不用写这里，启动后在页面里配。
+
+**第 4 步 · 启动**
+
+```bash
+./start.sh                            # 前台运行；后台常驻：nohup ./start.sh >artex.log 2>&1 &
+```
+
+打开 `http://localhost:8787`，首次进入 `/setup` 设置管理员密码。
+
+**第 5 步 · 配 LLM**
+
+页面「系统设置」里填 `ANTHROPIC_API_KEY` 或 `OPENAI_API_KEY`（也可以用环境变量给进程）。
+没有 key 能登录、能建任务，但探索跑不动。
+
+**第 6 步 ·（强烈建议）装 MCP 工具链**
+
+```bash
+cd mcp
+sudo ./install-mcp.sh
+```
+
+它会：铺 5 个 MCP 脚本 → 下载 nuclei / subfinder / nuclei-templates → 生成 provider-config 模板 →
+注册进数据库并授权全部 agent。详见[「MCP 工具链」](#mcp-工具链补齐扫描与子域能力)。
+
+**第 7 步 · 验证**
+
+```bash
+export DSN='postgres://artex:你的密码@127.0.0.1:5432/artex?sslmode=disable'
+psql "$DSN" -c 'select key,builtin from agents order by id'          # 内置 agent（含提示词）
+psql "$DSN" -c 'select nkey,name from task_templates order by id'    # 新库应看到 6 条内置模版
+psql "$DSN" -c 'select name,enabled from mcp_servers order by name'  # 装了 MCP 才有这几行
+psql "$DSN" -c 'select s.name,count(*) from mcp_tools_cache c
+                join mcp_servers s on s.id=c.server_id group by 1'   # agent 领到意图后才有数据
+```
+
+> 请用 `start.sh` / `start.bat` 启动，不要直接跑 `./artex`。它是守护脚本：进程退出后按退出码
+> 决定是否重新拉起，**页面上的[一键更新](#方式一页面一键更新推荐)靠它完成换装**；直接跑 `./artex`
+> 更新完就不会再被拉起了。
+
+> **关于 Webshell**：MCP 服务端脚本随包（`mcp/webshell/`），页面与 MCP 的会话管理功能开箱可用；
+> 但它的 payload 库（可直接落地的马）**不入库、也不随包分发**——`payload_list` 初始是空的。
+> 把你的 payload 放进数据目录的 `payloads/webshell/<php|jsp|aspx>/` 即可，详见 `webshell/README.md`。
 
 ### 方式四：从源码编译单二进制
 
@@ -137,6 +198,34 @@ ARTEX_TARGETS=linux/amd64,windows/amd64 ./build.sh --release
 ```
 
 ---
+
+## MCP 工具链（补齐扫描与子域能力）
+
+ARTEX 本体是单二进制，**但扫描、子域枚举、路径探测这些能力由外挂 MCP 子进程提供**。
+Release 包里的 `mcp/` 目录就是这套东西的源码与一键安装入口：
+
+| MCP | 能力 | 随 Release 分发 |
+|---|---|---|
+| `Nuclei` | POC 模板库检索、指纹探测、实弹验证、指纹→匹配→验证一条龙 | ✅ |
+| `Subfinder` | 被动子域枚举、字典爆破、Hunter 测绘、DNS 解析、HTTP 探活 | ✅ |
+| `WebPath` | 站点路径枚举（软 404 基线 + 硬限速） | ✅ |
+| `OOB` | 带外回连会话（需要公网可达端口） | ✅ |
+| `Webshell` | 会话登记、命令执行、文件管理 | ✅ 脚本随包；payload 库需自备 |
+
+安装步骤：
+
+```bash
+cd mcp
+sudo ./install-mcp.sh              # 默认装 Nuclei/Subfinder/WebPath/OOB，并注册授权
+./install-mcp.sh --no-download     # 离线：只铺脚本 + 注册（扫描器自备）
+./install-mcp.sh --only nuclei     # 只装其中一个
+./install-mcp.sh --dry-run         # 只打印计划，不落盘
+```
+
+国内拉不动 GitHub 时换基址：`./install-mcp.sh --github-base https://ghfast.top/https://github.com`。
+
+装完到页面「系统 → MCP」应能看到对应服务且已启用。不装这套的效果：平台能开、能建任务、
+能对话，但 agent 手里没有扫描工具。细节与排错见 [mcp/README.md](mcp/README.md)。
 
 ## 更新升级
 
