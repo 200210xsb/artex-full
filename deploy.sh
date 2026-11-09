@@ -146,6 +146,7 @@ if [ -n "$ZIP_SRC" ]; then
 	case "$ZIP_SRC" in
 		http://*|https://*)
 			if [ -t 2 ]; then CURL_OPTS="-fL --progress-bar"; else CURL_OPTS="-fsSL"; fi
+			CURL_OPTS="$CURL_OPTS --retry 3 --retry-delay 2"
 			# shellcheck disable=SC2086
 			curl $CURL_OPTS -o "$ZIP" "$ZIP_SRC" || die "下载失败：$ZIP_SRC" ;;
 		*) [ -f "$ZIP_SRC" ] || die "找不到文件：$ZIP_SRC"; cp "$ZIP_SRC" "$ZIP" ;;
@@ -156,6 +157,7 @@ else
 	step "下载 ${PKG}"
 	# 管道执行（curl | bash）时 stderr 不是终端，进度条会糊一屏，这时只留最终结果
 	if [ -t 2 ]; then CURL_OPTS="-fL --progress-bar"; else CURL_OPTS="-fsSL"; fi
+	CURL_OPTS="$CURL_OPTS --retry 3 --retry-delay 2"
 	# shellcheck disable=SC2086
 	curl $CURL_OPTS -o "$ZIP" "${BASE}/${PKG}" \
 		|| die "下载失败：${BASE}/${PKG}
