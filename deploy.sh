@@ -144,14 +144,24 @@ ZIP="$TMP/$PKG"
 
 if [ -n "$ZIP_SRC" ]; then
 	case "$ZIP_SRC" in
-		http://*|https://*) curl -fL --progress-bar -o "$ZIP" "$ZIP_SRC" ;;
+		http://*|https://*)
+			if [ -t 2 ]; then CURL_OPTS="-fL --progress-bar"; else CURL_OPTS="-fsSL"; fi
+			# shellcheck disable=SC2086
+			curl $CURL_OPTS -o "$ZIP" "$ZIP_SRC" || die "下载失败：$ZIP_SRC" ;;
 		*) [ -f "$ZIP_SRC" ] || die "找不到文件：$ZIP_SRC"; cp "$ZIP_SRC" "$ZIP" ;;
 	esac
 	ok "使用指定包：$ZIP_SRC"
 else
 	BASE="https://github.com/${REPO}/releases/download/${VERSION}"
 	step "下载 ${PKG}"
-	curl -fL --progress-bar -o "$ZIP" "${BASE}/${PKG}" || die "下载失败：${BASE}/${PKG}"
+	# 管道执行（curl | bash）时 stderr 不是终端，进度条会糊一屏，这时只留最终结果
+	if [ -t 2 ]; then CURL_OPTS="-fL --progress-bar"; else CURL_OPTS="-fsSL"; fi
+	# shellcheck disable=SC2086
+	curl $CURL_OPTS -o "$ZIP" "${BASE}/${PKG}" \
+		|| die "下载失败：${BASE}/${PKG}
+    网络受限时改用 --zip 指定本地包，例如：
+      bash deploy.sh --version ${VERSION} --zip ./${PKG}"
+	ok "已下载 $(du -h "$ZIP" | cut -f1)"
 	if curl -fsSL -m 20 -o "$TMP/SHA256SUMS" "${BASE}/SHA256SUMS" 2>/dev/null \
 		&& grep -qE "[[:space:]]${PKG}\$" "$TMP/SHA256SUMS"; then
 		( cd "$TMP" && grep -E "[[:space:]]${PKG}\$" SHA256SUMS | sha256sum -c - >/dev/null ) \
