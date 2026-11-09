@@ -57,9 +57,54 @@ AI 自主渗透测试系统（Go 后端 + Next.js 前端）
 >
 > **Docker 首次构建的资源要求**：前端静态导出 + Go 静态编译 + Playwright 装 chromium 会同时跑在容器里，
 > 内存建议 **≥ 4 GB**（3.6 GB 的小机器实测会被拖死），磁盘预留 8 GB 左右。
-> 机器吃不消就走**方式四（下载预编译包）**，解压即用，不需要构建。
+> 机器吃不消就走**方式零（一键部署，直接下预编译包，不编译）**。
 
-### 方式一：一键安装脚本（推荐）
+### 方式零：一行命令部署（最省事，约 2 分钟）
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/200210xsb/artex-full/main/deploy.sh | sudo bash
+```
+
+全自动、幂等，**重跑即升级**（配置与数据都保留）。脚本做这些事：
+
+- 检查系统、补 `curl unzip`；需要时装 Docker（只用来跑 PostgreSQL，ARTEX 本体是单二进制）
+- 从 Releases 下载对应架构的包并校验 SHA256（不编译，14 MB，秒下）
+- 装到 `/opt/artex`；已有的 `config.json` / `data/` / `skills/` 一律保留
+- 起 PostgreSQL（复用已有容器，或新建一个；密码随机生成，宿主机端口冲突自动从 5432 往后找）
+- 写 systemd 服务并启动，等 `/api/health` 通过才返回
+- 打印访问地址、日志/重启/升级/卸载命令
+
+完成后打开 `http://<公网IP>:8787`，首次进入会跳 `/setup` 设管理员密码。
+
+```bash
+# 换端口，装完顺手铺 MCP 工具链（nuclei / subfinder / 模板）
+curl -fsSL .../deploy.sh | sudo bash -s -- --port 9000 --with-mcp
+
+# 用已有的 PostgreSQL，不起容器
+curl -fsSL .../deploy.sh | sudo bash -s -- --dsn 'postgres://user:pass@host:5432/artex?sslmode=disable'
+
+# 内网 / 离线：用本地包
+sudo bash deploy.sh --version v0.4.0 --zip /path/artex-0.4.0-linux-amd64.zip
+
+# 卸载（加 --purge 连安装目录、容器、数据卷一起删）
+sudo bash deploy.sh --uninstall --purge
+```
+
+| 参数 | 说明 | 默认 |
+|---|---|---|
+| `--dir` | 安装目录 | `/opt/artex` |
+| `--port` | 对外端口（代理端口自动取 +1） | `8787` |
+| `--version` | 版本号 | `latest` |
+| `--dsn` | 用已有 PostgreSQL | 自动起容器 |
+| `--zip` | 本地 / 内网镜像的包 | 从 GitHub 下 |
+| `--service` | systemd 服务名 | `artex` |
+| `--with-mcp` | 装完执行 `mcp/install-mcp.sh` | 不装 |
+| `--no-start` | 只铺文件，不注册服务 | — |
+| `--uninstall` / `--purge` | 卸载 / 连数据一起删 | — |
+
+> 只支持 Linux，需要 root。没有 systemd 的环境（容器 / WSL）会自动退化成 `nohup` 后台启动。
+
+### 方式一：交互式安装脚本
 
 ```bash
 git clone https://github.com/200210xsb/artex-full.git
