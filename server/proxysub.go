@@ -954,9 +954,19 @@ func (sc *ProxySidecar) startLocked(node ProxyNode, restart bool) error {
 	if !restart && !sc.running {
 		sc.prevProxy = sc.currentEgress()
 	}
-	// 换节点或守护重启：先停旧进程；再清理 ARTEX 重启后遗留的僵尸边车。
-	sc.killLocked()
+	// 换节点或守护重启：先清 ARTEX 重启后遗留的僵尸边车，再停当前进程。
+	// 顺序不能反：killLocked 会删掉 PID 文件，而 killStale 正是靠这个文件找残留
+	// 进程，先删就等于它永远读不到 PID —— 那段清理等于死代码，僵尸会一直占着
+	// 7890，边车再也起不来（报「端口已被占用」）。
 	sc.killStale()
+	sc.killLocked()
+	// agent 侧自己拉起的 sing-box 有时会复用全局这份配置（data/proxy/sing-box.json）。
+	// 它随 shell 退出被 init 收养后变成孤儿，长期占着端口，而 ARTEX 并不知情。
+	// 命令行里带着同一份配置路径才动手，任务级边车（各自任务目录里的 sb_<port>.json）
+	// 不会被误伤。
+	if n := killSingBoxByConfig(cfgPath); n > 0 {
+		log.Printf("[proxy] 已清理 %d 个复用 %s 的遗留 sing-box 进程", n, cfgPath)
+	}
 	if err := waitPortFree(proxyListenAddr, 3*time.Second); err != nil {
 		return err
 	}
@@ -1110,6 +1120,39 @@ func (sc *ProxySidecar) killLocked() {
 	if sc.dir != "" {
 		_ = os.Remove(proxyPIDPath(sc.dir))
 	}
+}
+
+// killSingBoxByConfig 杀掉所有命令行里引用该配置文件的 sing-box 进程，返回杀掉的个数。
+// 只同时匹配「sing-box」与「该配置路径」两个条件：全局配置只有全局边车在用，
+// 任务级边车用的是各自任务目录里的 sb_<port>.json，不会被误杀。
+func killSingBoxByConfig(cfgPath string) int {
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return 0
+	}
+	killed := 0
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		pid, err := strconv.Atoi(e.Name())
+		if err != nil || pid <= 0 || pid == os.Getpid() {
+			continue
+		}
+		b, err := os.ReadFile(filepath.Join("/proc", e.Name(), "cmdline"))
+		if err != nil {
+			continue
+		}
+		cmd := strings.ReplaceAll(string(b), "\x00", " ")
+		if !strings.Contains(cmd, "sing-box") || !strings.Contains(cmd, cfgPath) {
+			continue
+		}
+		if proc, findErr := os.FindProcess(pid); findErr == nil {
+			_ = proc.Kill()
+			killed++
+		}
+	}
+	return killed
 }
 
 // killStale 清理 ARTEX 重启后遗留的 sing-box（pid 文件里的进程），

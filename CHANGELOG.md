@@ -2,6 +2,22 @@
 
 本项目的重要变更记录在此文件中，格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.4.1] - 2026-11-11
+
+修一个会让全局代理彻底瘫痪的 bug：端口被占，页面上的「启动 sing-box 边车」永远失败。
+
+- **`killStale()` 之前是死代码**：`startLocked` 里先调 `killLocked()`（会删掉 PID 文件），
+  再调 `killStale()`（靠 PID 文件找残留进程），顺序反了导致它永远读不到 PID，
+  ARTEX 重启后遗留的僵尸边车清不掉。
+- **新增 `killSingBoxByConfig()`**：agent 侧自己拉起的 sing-box 会复用全局配置
+  （`data/proxy/sing-box.json`），shell 退出后它被 init 收养变成孤儿，长期占着 7890。
+  启动边车前按「命令行同时含 sing-box 与同一份配置路径」精确清理，任务级边车
+  （各自任务目录里的 `sb_<port>.json`）不受影响。
+- 补回归测试 `TestKillSingBoxByConfig`：只杀配置匹配的目标，不误杀别的配置的边车。
+
+现象与影响：全局出口静默回滚成直连，页面报「端口 127.0.0.1:7890 已被占用，
+无法启动 sing-box 边车（可能有旧的 sing-box 在跑）」，扫描流量全部走直连。
+
 ## [0.4.0] - 2026-11-05
 
 ### 外挂 MCP 工具链进包：解压即可补齐扫描 / 拿 shell 能力
