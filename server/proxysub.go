@@ -1122,9 +1122,15 @@ func (sc *ProxySidecar) killLocked() {
 	}
 }
 
-// killSingBoxByConfig 杀掉所有命令行里引用该配置文件的 sing-box 进程，返回杀掉的个数。
-// 只同时匹配「sing-box」与「该配置路径」两个条件：全局配置只有全局边车在用，
-// 任务级边车用的是各自任务目录里的 sb_<port>.json，不会被误杀。
+// killSingBoxByConfig 杀掉所有「用这份配置启动」的 sing-box 进程，返回杀掉的个数。
+//
+// 匹配要求两条证据同时成立，缺一不可：
+//  1. argv 里有某一项的 basename 是 sing-box（真的是这个程序，不是顺带提到的）
+//  2. argv 里有相邻的 "-c" 和该配置路径这一对
+//
+// 只按子串找曾经把「只是提到这两个字符串」的进程一起 SIGKILL 掉——agent 的
+// shell、grep、甚至运维的 ssh 命令都被误杀过。任务级边车用的是各自任务目录里的
+// sb_<port>.json，配置对不上，同样不会被动到。
 func killSingBoxByConfig(cfgPath string) int {
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
@@ -1143,8 +1149,28 @@ func killSingBoxByConfig(cfgPath string) int {
 		if err != nil {
 			continue
 		}
-		cmd := strings.ReplaceAll(string(b), "\x00", " ")
-		if !strings.Contains(cmd, "sing-box") || !strings.Contains(cmd, cfgPath) {
+		argv := strings.Split(strings.TrimRight(string(b), "\x00"), "\x00")
+		if len(argv) < 2 {
+			continue
+		}
+		isSingBox := false
+		for _, a := range argv {
+			if filepath.Base(a) == "sing-box" {
+				isSingBox = true
+				break
+			}
+		}
+		if !isSingBox {
+			continue
+		}
+		matched := false
+		for i := 1; i+1 < len(argv); i++ {
+			if argv[i] == "-c" && argv[i+1] == cfgPath {
+				matched = true
+				break
+			}
+		}
+		if !matched {
 			continue
 		}
 		if proc, findErr := os.FindProcess(pid); findErr == nil {
