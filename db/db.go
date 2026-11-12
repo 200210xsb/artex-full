@@ -676,29 +676,57 @@ WHERE NOT EXISTS (SELECT 1 FROM intercept_rules WHERE name = $1)`,
 	return d.SetSetting("intercept_default_rules_v3", "done")
 }
 
-// seedTaskTemplates 播种内置任务模版，只在首次初始化时执行一次。
+// taskTemplateSeed 是一条内置任务模版的种子数据。
+type taskTemplateSeed struct {
+	Name           string          `json:"name"`
+	NKey           string          `json:"nkey"`
+	Description    string          `json:"description"`
+	Goal           string          `json:"goal"`
+	AgentKey       *string         `json:"agent_key"`
+	InterceptRules json.RawMessage `json:"intercept_rules"`
+}
+
+// taskTemplatesSeedV2Keys 是 v2 增量播种要补的内置模版。
 //
-// 为什么带一次性标记而不是每次启动都 INSERT ... ON CONFLICT DO NOTHING：
-// 用户可能删掉某个内置模版（或改名），下次重启不该把它又塞回来。
-// 标记写进 settings，播种成功后置位，之后无论怎么重启都不再碰这张表。
-func (d *DB) seedTaskTemplates() error {
-	if v, _, _ := d.GetSetting("task_templates_seed_v1"); v == "true" {
-		return nil
-	}
+// 老部署的 v1 标记已经是 true，seedTaskTemplates 整体跳过，之后新增的内置模版
+// 就永远拿不到。v2 只补这里列出的 nkey：既让老部署升级后能看到新模版，又不会
+// 把用户此前删掉/改名过的旧模版重新塞回去。以后再加内置模版，把 nkey 加进这里
+// 并把标记版本递增即可。
+var taskTemplatesSeedV2Keys = []string{"src_authorized"}
+
+func loadTaskTemplateSeed() ([]taskTemplateSeed, error) {
 	var seed struct {
-		Templates []struct {
-			Name           string          `json:"name"`
-			NKey           string          `json:"nkey"`
-			Description    string          `json:"description"`
-			Goal           string          `json:"goal"`
-			AgentKey       *string         `json:"agent_key"`
-			InterceptRules json.RawMessage `json:"intercept_rules"`
-		} `json:"templates"`
+		Templates []taskTemplateSeed `json:"templates"`
 	}
 	if err := json.Unmarshal([]byte(taskTemplatesSeedJSON), &seed); err != nil {
-		return fmt.Errorf("parse task_templates_seed.json: %w", err)
+		return nil, fmt.Errorf("parse task_templates_seed.json: %w", err)
 	}
-	for _, t := range seed.Templates {
+	return seed.Templates, nil
+}
+
+// seedTemplateSubset 从全量种子里挑出 keys 指定的模版，保持原文件顺序。
+// 单独抽出来是为了能脱离数据库测：keys 里写错一个 nkey 时，v2 会静默地什么都不补，
+// 这种错只有在真升级后才会被发现。
+func seedTemplateSubset(list []taskTemplateSeed, keys []string) []taskTemplateSeed {
+	if len(keys) == 0 {
+		return nil
+	}
+	want := make(map[string]bool, len(keys))
+	for _, k := range keys {
+		want[k] = true
+	}
+	out := make([]taskTemplateSeed, 0, len(keys))
+	for _, t := range list {
+		if want[t.NKey] {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// insertTaskTemplateSeeds 幂等写入：nkey 已存在就跳过（尊重用户改动）。
+func (d *DB) insertTaskTemplateSeeds(list []taskTemplateSeed) error {
+	for _, t := range list {
 		rules := strings.TrimSpace(string(t.InterceptRules))
 		if rules == "" || rules == "null" {
 			rules = "[]"
@@ -715,5 +743,40 @@ ON CONFLICT (nkey) DO NOTHING`,
 			return fmt.Errorf("seed task template %s: %w", t.NKey, err)
 		}
 	}
-	return d.SetSetting("task_templates_seed_v1", "true")
+	return nil
+}
+
+// seedTaskTemplates 播种内置任务模版。
+//
+// 为什么带一次性标记而不是每次启动都 INSERT ... ON CONFLICT DO NOTHING：
+// 用户可能删掉某个内置模版（或改名），下次重启不该把它又塞回来。
+// 标记写进 settings，播种成功后置位，之后无论怎么重启都不再碰这张表。
+// v2 标记只负责补齐后续新增的内置模版（见 taskTemplatesSeedV2Keys）。
+func (d *DB) seedTaskTemplates() error {
+	if v, _, _ := d.GetSetting("task_templates_seed_v1"); v != "true" {
+		list, err := loadTaskTemplateSeed()
+		if err != nil {
+			return err
+		}
+		if err := d.insertTaskTemplateSeeds(list); err != nil {
+			return err
+		}
+		if err := d.SetSetting("task_templates_seed_v1", "true"); err != nil {
+			return err
+		}
+	}
+	if v, _, _ := d.GetSetting("task_templates_seed_v2"); v != "true" {
+		list, err := loadTaskTemplateSeed()
+		if err != nil {
+			return err
+		}
+		add := seedTemplateSubset(list, taskTemplatesSeedV2Keys)
+		if err := d.insertTaskTemplateSeeds(add); err != nil {
+			return err
+		}
+		if err := d.SetSetting("task_templates_seed_v2", "true"); err != nil {
+			return err
+		}
+	}
+	return nil
 }

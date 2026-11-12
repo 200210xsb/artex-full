@@ -2,6 +2,29 @@
 
 本项目的重要变更记录在此文件中，格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.4.3] - 2026-11-12
+
+新增一个内置任务模版：**SRC 授权资产测试**（`nkey=src_authorized`）。
+
+把《SRC行业授权资产安全测试规范-Agent版 v2.5》里可执行的部分落进模版 `goal`，
+开任务即生效，不依赖操作者临时拼提示词：
+
+- 一票否决红线（删除/覆盖类、拖库、拒绝服务、内网横向、真实用户触达、写入型注入自动化…）；
+- 接口语义分级（删除/覆盖/修改/状态流转/新增/读取六档，含换皮与拼音变体，判不清按禁止）；
+- 数据预算（`vuln_samples=5`、`internal_lateral_hosts=0`、`response_body_max_mb=10` 等）；
+- 敏感信息命中即停、产物集中到 `./artifacts/`、立即终止条件；
+- "向本方确认"对 Agent 的执行语义（全量停止，不是换个接口接着测）；
+- `[RULES_LOADED v2.5]` 加载契约，第一句没输出即视为未加载。
+
+**种子机制加了 v2 增量门**：老部署的 `task_templates_seed_v1` 已是 true，
+整体播种会跳过，之后新增的内置模版永远拿不到。现在 `task_templates_seed_v2`
+只补 `taskTemplatesSeedV2Keys` 里列出的新模版（`ON CONFLICT (nkey) DO NOTHING`），
+既让老部署升级后看到新模版，又不会把用户此前删掉/改名过的旧模版塞回来。
+
+补测试：`taskTemplatesSeedV2Keys` 里的 nkey 必须能在种子文件里找到
+（拼错会静默地什么都不补）、每条种子的字段与长度满足建表约束、
+`src_authorized` 的 goal 必须含红线/语义分级/预算/加载契约四段。
+
 ## [0.4.2] - 2026-11-11
 
 修 0.4.1 引入的误伤：清理僵尸 sing-box 的匹配条件收紧到 argv 级精确判定。
