@@ -515,7 +515,8 @@ export default function WebshellPage() {
   // -------------------------------------------------------------------------
 
   return (
-    <div className="flex h-full min-h-0 flex-col overflow-hidden bg-background">
+    <div data-content-padding={false}
+      className="flex h-[calc(100vh-3rem)] min-h-0 flex-col overflow-hidden bg-background">
       {/* ---------- 顶部导航条 ---------- */}
       <div className="flex h-11 shrink-0 items-center gap-3 border-b px-3">
         <h1 className="flex items-center gap-2 text-sm font-semibold">
