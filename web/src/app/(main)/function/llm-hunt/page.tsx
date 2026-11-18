@@ -54,6 +54,23 @@ const SOURCE_LABEL: Record<string, string> = {
   "target-js": "目标 JS",
 };
 
+// usePersisted 把开关状态存进 localStorage：刷新页面后不用重新勾一遍。
+function usePersisted(key: string, def: boolean): [boolean, (v: boolean) => void] {
+  const [v, setV] = React.useState<boolean>(def);
+  React.useEffect(() => {
+    try {
+      const raw = localStorage.getItem("llmhunt:" + key);
+      if (raw === "1") setV(true);
+      else if (raw === "0") setV(false);
+    } catch {}
+  }, [key]);
+  const set = React.useCallback((next: boolean) => {
+    setV(next);
+    try { localStorage.setItem("llmhunt:" + key, next ? "1" : "0"); } catch {}
+  }, [key]);
+  return [v, set];
+}
+
 export default function LLMHuntPage() {
   const [status, setStatus] = React.useState<ScanStatus>({ running: false, last: null });
   const [stats, setStats] = React.useState<KeyStats | null>(null);
@@ -61,12 +78,12 @@ export default function LLMHuntPage() {
   const [keys, setKeys] = React.useState<LeakKey[]>([]);
   const [gh, setGh] = React.useState<GHStatus | null>(null);
 
-  const [repeat, setRepeat] = React.useState(true);
-  const [autoVerify, setAutoVerify] = React.useState(false);
-  const [huntLeaks, setHuntLeaks] = React.useState(true);
-  const [useSearch, setUseSearch] = React.useState(false);
-  const [fromAssets, setFromAssets] = React.useState(false);
-  const [allowAuth, setAllowAuth] = React.useState(false);
+  const [repeat, setRepeat] = usePersisted("repeat", true);
+  const [autoVerify, setAutoVerify] = usePersisted("autoVerify", false);
+  const [huntLeaks, setHuntLeaks] = usePersisted("huntLeaks", true);
+  const [useSearch, setUseSearch] = usePersisted("useSearch", false);
+  const [fromAssets, setFromAssets] = usePersisted("fromAssets", false);
+  const [allowAuth, setAllowAuth] = usePersisted("allowAuth", false);
   const [seeds, setSeeds] = React.useState("");
   const [showAdvanced, setShowAdvanced] = React.useState(false);
   const [busy, setBusy] = React.useState(false);
