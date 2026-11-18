@@ -227,7 +227,9 @@ func (s *Scanner) run(ctx context.Context, scanID int64, opts Options) {
 				}
 			}
 			s.logf("泄漏狩猎第 %d 轮：抓取 %d 个 URL，命中 %d 条 key（累计 %d）%s", round, fetched, found, s.keysNow(), verified)
-			_ = s.pg.UpdateLLMScan(scanID, s.done, s.assets, s.keys, "", "")
+			note := fmt.Sprintf("第 %d 轮 · 抓取 %d 个 URL · 本轮命中 %d · 累计 %d 条 key%s",
+				round, fetched, found, s.keysNow(), verified)
+			_ = s.pg.UpdateLLMScan(scanID, fetched, s.assets, s.keys, "", note)
 			if !opts.Repeat {
 				break
 			}

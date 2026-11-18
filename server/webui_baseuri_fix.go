@@ -31,9 +31,11 @@ import "bytes"
 // 病态情况（0 次 → 1 次 → 2 次后就放手，绝不无限重载）。
 const webuiBaseURIFixScript = `<script>(function(){try{` +
 	`var b=document.baseURI||"";` +
-	`if(!/^[a-z][a-z0-9+.-]*:\/\/[^\/@]*@/i.test(b))return;` +
+	`if(!/^[a-z][a-z0-9+.-]*:\/\/[^\/@]*@/i.test(b)){try{sessionStorage.removeItem("artex:cleanurl")}catch(e){}return;}` +
 	`var k="artex:cleanurl",n=parseInt(sessionStorage.getItem(k)||"0",10);` +
-	`if(n>2)return;sessionStorage.setItem(k,String(n+1));` +
+	// 上限放到 10：用户常常从书签里反复用带凭据的地址打开，2 次太容易耗尽，
+	// 耗尽后就再也不自愈了，表现就是"刷新后页面空了"。
+	`if(n>10)return;sessionStorage.setItem(k,String(n+1));` +
 	`location.replace(location.origin+location.pathname+location.search+location.hash)` +
 	`}catch(e){}})();</script>`
 

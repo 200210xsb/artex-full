@@ -34,7 +34,10 @@ type LeakKey = {
   id: number; key_type: string; masked: string; url: string; found_at: string;
   source_kind?: string; repo?: string; verify_state?: string; verify_note?: string;
 };
-type ScanStatus = { running: boolean; last: { id: number; status: string; total: number; done: number; keys: number } | null };
+type ScanStatus = {
+  running: boolean;
+  last: { id: number; status: string; total: number; done: number; keys: number; note?: string } | null;
+};
 type KeyStats = { by_provider: Record<string, number>; by_source: Record<string, number>; total: number; verified: number };
 type GHStatus = { ready: boolean; running: boolean; found: number; dorks_done?: number; files_fetched?: number; last_error?: string };
 
@@ -179,6 +182,24 @@ export default function LLMHuntPage() {
     }
   };
 
+  // exportCsv 导出的只有掩码与元信息，**不含明文**（避免凭据被随手落盘传播）。
+  const exportCsv = () => {
+    const head = ["type", "masked", "verify", "source", "url", "found_at"];
+    const rows = shown.map((k) => [
+      k.key_type, k.masked, k.verify_state || "unverified",
+      SOURCE_LABEL[k.source_kind ?? "target"] ?? k.source_kind ?? "", k.repo || k.url, k.found_at,
+    ]);
+    const csv = [head, ...rows]
+      .map((r) => r.map((c) => `"${String(c ?? "").replace(/"/g, '""')}"`).join(","))
+      .join("\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `llm-keys-${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  };
+
   const del = async (kind: "assets" | "keys", id: number) => {
     if (!confirm("确认删除这条记录？")) return;
     try {
@@ -217,9 +238,9 @@ export default function LLMHuntPage() {
         <Kpi label="已确认有效" value={stats?.verified ?? 0} tone={stats?.verified ? "bad" : "muted"} hint="仅 OpenAI / Anthropic 可验证" />
         <Kpi label="暴露实例" value={assets.length} hint="Ollama / Dify / Flowise …" />
         <Kpi
-          label="本轮"
-          value={last ? `${last.done}/${last.total}` : "—"}
-          hint={last ? last.status : "尚未开始"}
+          label="狩猎状态"
+          value={status.running ? "运行中" : last ? "已停止" : "未开始"}
+          hint={last?.note || (last ? `#${last.id} · ${last.status}` : "点「开始狩猎」")}
         />
       </div>
 
@@ -233,13 +254,23 @@ export default function LLMHuntPage() {
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
-          <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
-            <Toggle checked={huntLeaks} onChange={setHuntLeaks} label="找泄漏的密钥文件" title="Hunter/Quake 查响应体已含 key 的 URL" />
-            <Toggle checked={repeat} onChange={setRepeat} label="持续狩猎" title="每 5 分钟一轮，直到手动停止" />
-            <Toggle checked={autoVerify} onChange={setAutoVerify} label="自动验证" title="每轮对新增 key 各发一次免费只读请求（仅列模型），上限 10 条" />
-            <Toggle checked={useSearch} onChange={setUseSearch} label="搜索引擎发现" />
-            <Toggle checked={fromAssets} onChange={setFromAssets} label="扫资产库" />
-            <Toggle checked={allowAuth} onChange={setAllowAuth} label="默认口令探测" title="每平台最多试 8 组默认口令，遇锁定即停" />
+          <div className="grid gap-3 md:grid-cols-2">
+            <div className="rounded-lg border p-3">
+              <p className="mb-2 text-xs font-medium text-muted-foreground">狩猎来源</p>
+              <div className="flex flex-wrap gap-x-4 gap-y-2">
+                <Toggle checked={huntLeaks} onChange={setHuntLeaks} label="泄漏的密钥文件" title="Hunter/Quake 查响应体已含 key 的 URL（产出最高）" />
+                <Toggle checked={useSearch} onChange={setUseSearch} label="搜索引擎发现" />
+                <Toggle checked={fromAssets} onChange={setFromAssets} label="扫资产库" />
+                <Toggle checked={allowAuth} onChange={setAllowAuth} label="默认口令探测" title="每平台最多试 8 组默认口令，遇锁定即停" />
+              </div>
+            </div>
+            <div className="rounded-lg border p-3">
+              <p className="mb-2 text-xs font-medium text-muted-foreground">运行方式</p>
+              <div className="flex flex-wrap gap-x-4 gap-y-2">
+                <Toggle checked={repeat} onChange={setRepeat} label="持续狩猎（5 分钟一轮）" title="直到手动停止" />
+                <Toggle checked={autoVerify} onChange={setAutoVerify} label="自动验证可用性" title="每轮对新增 key 各发一次免费只读请求（仅列模型），上限 10 条" />
+              </div>
+            </div>
           </div>
 
           <div className="flex flex-wrap items-center gap-2">
@@ -307,6 +338,9 @@ export default function LLMHuntPage() {
                   <Switch checked={onlyVerified} onCheckedChange={setOnlyVerified} size="sm" />
                   只看有效
                 </label>
+                <Button size="sm" variant="outline" onClick={exportCsv} disabled={shown.length === 0}>
+                  <CopyIcon className="size-3.5" /> 导出 CSV
+                </Button>
                 <Button size="sm" variant="outline" onClick={verifyPending} disabled={status.running}>
                   <ShieldCheckIcon className="size-3.5" /> 验证未验证的
                 </Button>

@@ -21,6 +21,7 @@ import {
   Loader2Icon,
   PlusIcon,
   RefreshCwIcon,
+  SearchIcon,
   SendIcon,
   TerminalIcon,
   Trash2Icon,
@@ -334,6 +335,8 @@ export default function WebshellPage() {
 
   // 多选：勾选后可批量改 / 批量删
   const [checked, setChecked] = React.useState<string[]>([]);
+  // 会话多了以后逐个找很费劲：按名称/类型/地址做本地过滤。
+  const [q, setQ] = React.useState("");
   const [bulkOpen, setBulkOpen] = React.useState(false);
   const [bulkBusy, setBulkBusy] = React.useState(false);
   // 批量改只动这四个字段：留空 = 保持原值。参数名/头/URL 这些页面拿不到（打码），
@@ -763,12 +766,21 @@ export default function WebshellPage() {
   const payloadTypes = Array.from(new Set(payloads.map((p) => p.type)));
   const crumbs = crumbsOf(remotePath);
 
+  const filteredSessions = React.useMemo(() => {
+    const k = q.trim().toLowerCase();
+    if (!k) return sessions;
+    return sessions.filter((it) => JSON.stringify(it).toLowerCase().includes(k));
+  }, [sessions, q]);
+
   return (
     <div className="flex flex-col gap-4 p-4">
       {/* 顶部：标题 + 状态 */}
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
-          <h1 className="font-heading font-semibold text-xl">WebShell</h1>
+          <div className="flex items-center gap-2">
+            <h1 className="font-heading font-semibold text-xl">WebShell</h1>
+            <ConnBadge state={conn} compact />
+          </div>
           <p className="text-muted-foreground text-sm">
             会话登记与命令控制台 · 与 MCP 共用 <span className="font-mono text-xs">webshells.json</span>
           </p>
@@ -813,6 +825,17 @@ export default function WebshellPage() {
             <CardDescription className="text-xs">
               点一下切换会话；左侧勾选后可批量改 / 批量删（删除默认只摘登记，可勾选连远端一起删）。
             </CardDescription>
+            {sessions.length > 0 ? (
+              <div className="relative pt-1">
+                <SearchIcon className="pointer-events-none absolute top-1/2 left-2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+                <Input
+                  value={q}
+                  onChange={(e) => setQ(e.target.value)}
+                  placeholder="搜索会话：名称 / 类型 / 地址"
+                  className="h-8 pl-7 text-xs"
+                />
+              </div>
+            ) : null}
             {sessions.length > 0 ? (
               <div className="flex flex-wrap items-center gap-2 pt-1">
                 <label className="flex cursor-pointer items-center gap-1.5 text-xs text-muted-foreground">
@@ -859,10 +882,12 @@ export default function WebshellPage() {
                   </EmptyContent>
                 </Empty>
               </div>
-            ) : (
+            ) : filteredSessions.length === 0 ? (
+                <p className="px-2 py-6 text-center text-xs text-muted-foreground">没有匹配「{q}」的会话</p>
+              ) : (
               <ScrollArea className="max-h-[min(52vh,420px)] lg:max-h-[calc(100vh-26rem)]">
                 <div className="flex flex-col gap-0.5 pr-2">
-                  {sessions.map((s) => {
+                  {filteredSessions.map((s) => {
                     const active = s.name === selected;
                     return (
                       <div
