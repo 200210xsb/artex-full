@@ -191,6 +191,9 @@ func (m *Manager) bringUp(ctx context.Context, inst *instance) error {
 	// 不可达，表现是"隧道已连接"但所有域名都解析失败。
 	writeNetnsResolv(inst.netns, logPath, nil)
 
+	// 让 IPv6 立即失败（而不是等超时）：调用方会立刻回落 IPv4。
+	_ = runIP(inst.netns, "-6", "route", "add", "unreachable", "::/0")
+
 	if err := m.startSocks(inst, dir); err != nil {
 		m.destroyNS(inst)
 		m.freeSlot(slot)
@@ -383,9 +386,13 @@ func waitTunnel(ctx context.Context, inst *instance, logPath string) error {
 // startSocks 在命名空间内起 sing-box，只做一件事：把 SOCKS 请求直接发出去
 // （命名空间里的默认路由已经是隧道）。
 func (m *Manager) startSocks(inst *instance, dir string) error {
+	// 隧道里没有 IPv6 通路，但平台 DNS 会返回 A+AAAA 混合。策略固定 ipv4_only：
+	// 否则一次域名拨号可能先试 AAAA、超时后才回 A，外部表现成"目标偶发不可达"，
+	// 会被 agent 误判成站点挂了（实测 erp.hxfl.com.cn 一度 000，同一域名稍后 200）。
 	cfg := fmt.Sprintf(`{"log":{"level":"warn"},
+ "dns":{"servers":[{"type":"local"}],"strategy":"ipv4_only"},
  "inbounds":[{"type":"mixed","listen":%q,"listen_port":%d}],
- "outbounds":[{"type":"direct","tag":"direct"}]}`, inst.nsIP, socksPort)
+ "outbounds":[{"type":"direct","tag":"direct","domain_strategy":"ipv4_only"}]}`, inst.nsIP, socksPort)
 	cfgPath := filepath.Join(dir, "socks.json")
 	if err := os.WriteFile(cfgPath, []byte(cfg), 0o600); err != nil {
 		return fmt.Errorf("写入 SOCKS 配置失败: %w", err)
