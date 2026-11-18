@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"runtime/debug"
+	"strings"
 
 	actool "github.com/Autumn-27/norma/tool"
 )
@@ -21,6 +22,31 @@ type DeferredInfo struct {
 	GlobalNames     []string          // MCP names to list in the system-prompt block
 	Unlock          *actool.UnlockSet // shared call-gate; nil when no MCP tools
 	UnlockSkill     func(skillName string)
+}
+
+// egressProxyKey carries the egress proxy (SOCKS/HTTP URL) a run's tools must use.
+// It travels on ctx because the MCP servers a run spawns inherit this process's
+// environment — and ARTEX itself has no HTTP_PROXY — so without an explicit
+// hand-off every stdio MCP tool would dial straight out, ignoring both the global
+// proxy and any per-task VPN tunnel.
+type egressProxyKey struct{}
+
+// WithEgressProxy attaches the run's egress proxy URL to ctx. Empty is a no-op.
+func WithEgressProxy(ctx context.Context, proxy string) context.Context {
+	proxy = strings.TrimSpace(proxy)
+	if proxy == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, egressProxyKey{}, proxy)
+}
+
+// EgressProxyFrom returns the egress proxy attached to ctx ("" when none).
+func EgressProxyFrom(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	v, _ := ctx.Value(egressProxyKey{}).(string)
+	return strings.TrimSpace(v)
 }
 
 // ToolAugment, if set, returns the EXTRA tools an agent should see beyond its

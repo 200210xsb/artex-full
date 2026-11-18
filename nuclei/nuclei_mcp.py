@@ -893,6 +893,13 @@ def _build_run_cmd(target, templates, tags, severity, timeout, rate_limit, extra
     cmd = [NUCLEI_BIN, "-u", target, "-jsonl", "-silent", "-disable-update-check", "-nc"]
     parts = []
 
+    # 出口：nuclei 是 Go 程序，不读 HTTP_PROXY，必须显式给 -proxy。
+    # ARTEX 会把本任务的出口（全局代理或某条 VPN 隧道）注入到本进程环境里。
+    egress = (os.environ.get("ARTEX_EGRESS_PROXY") or "").strip()
+    if egress:
+        cmd += ["-proxy", egress]
+        parts.append("出口 %s" % egress)
+
     # 并发与限速：默认限速 50 请求/秒，避免把目标打挂
     cmd += ["-rl", str(rate_limit)]
     parts.append("限速 %d req/s" % rate_limit)

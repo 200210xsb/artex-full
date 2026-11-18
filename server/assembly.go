@@ -109,7 +109,32 @@ func wireAgentAugment(pg *db.DB, skillDir string, hostTools func() ([]actool.Cor
 				if !directVisible && !skillGated {
 					continue // neither directly visible nor referenced by a visible skill
 				}
-				cl, err := connectMCP(ctx, m)
+				// 把本任务的出口注入 MCP 子进程：这些进程继承的是 ARTEX 自己的环境
+				// （没有 HTTP_PROXY），不显式给就会直连出去 —— 对绑了 VPN 的任务等于
+				// 从错误地址发包，而且界面上完全看不出来。
+				connectCfg := m
+				if egress := agent.EgressProxyFrom(ctx); egress != "" {
+					env := jsonStrMap(m.Env)
+					if env == nil {
+						env = map[string]string{}
+					}
+					for _, k := range []string{
+						"HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
+						"http_proxy", "https_proxy", "all_proxy",
+					} {
+						env[k] = egress
+					}
+					// 供不认 HTTP_PROXY 的工具自己取（nuclei 走 -proxy）。
+					env["ARTEX_EGRESS_PROXY"] = egress
+					if _, ok := env["NO_PROXY"]; !ok {
+						env["NO_PROXY"] = "127.0.0.1,localhost,::1"
+						env["no_proxy"] = env["NO_PROXY"]
+					}
+					withEnv := *m
+					withEnv.Env = encodeJSON(env)
+					connectCfg = &withEnv
+				}
+				cl, err := connectMCP(ctx, connectCfg)
 				if err != nil {
 					log.Printf("[mcp] %s 连接失败: %v", m.Name, err)
 					continue

@@ -2,6 +2,24 @@
 
 本项目的重要变更记录在此文件中，格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.5.5] - 2026-11-18
+
+修一个会让"绑了 VPN"变成摆设的问题：**只有 bash 工具真的走了任务出口**。
+
+MCP 子进程（Nuclei / Subfinder / WebPath / Webshell / OOB）继承的是 ARTEX 自己的环境，
+而 ARTEX 进程本身没有 `HTTP_PROXY` —— 所以这些工具一直**直连**出网，既不走全局代理，
+也不走任务绑的 VPN。界面写着"该任务的出网流量走这条隧道"，实际扫出去的包用的是宿主机
+IP。对众测项目这是合规问题，而且事后完全看不出来。
+
+- agent 侧新增 `WithEgressProxy` / `EgressProxyFrom`：每个 run 把出口 URL 挂到 ctx
+  （worker / planner / mainagent / chat 四个入口）
+- 建 MCP 连接时把 `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`（大小写都给）、
+  `NO_PROXY=127.0.0.1,localhost,::1` 和 `ARTEX_EGRESS_PROXY` 注入子进程环境
+- nuclei 是 Go 程序、不读 `HTTP_PROXY`，包装器改为显式传 `-proxy`（并把出口写进返回摘要，
+  跑之前就看得见从哪出去）
+- webpath 改为**任务出口优先**、其次录制代理、最后直连（录制代理的上游是平台全局代理，
+  不能替代任务出口）
+
 ## [0.5.4] - 2026-11-18
 
 真机联调漏洞盒子（TCP + AES-128-CBC）暴露的三个问题，都会让隧道"看起来连上了却不通"：

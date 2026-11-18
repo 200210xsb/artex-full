@@ -187,7 +187,13 @@ def build_opener(follow_redirects=False):
     """
     handlers = []
     used_proxy = False
-    if capture_proxy_alive(CAPTURE_PROXY):
+    # 任务级出口优先（ARTEX 注入）：绑了 VPN 的任务必须从那条隧道出去，
+    # 即使是录制代理也不能替代 —— 录制代理的上游是平台全局代理。
+    egress = (os.environ.get("ARTEX_EGRESS_PROXY") or "").strip()
+    if egress:
+        handlers.append(urllib.request.ProxyHandler({"http": egress, "https": egress}))
+        used_proxy = True
+    elif capture_proxy_alive(CAPTURE_PROXY):
         handlers.append(urllib.request.ProxyHandler(
             {"http": CAPTURE_PROXY, "https": CAPTURE_PROXY}))
         used_proxy = True
