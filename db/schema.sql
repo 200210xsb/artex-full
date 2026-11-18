@@ -857,6 +857,9 @@ CREATE TABLE IF NOT EXISTS mcp_servers (
     url         TEXT,
     enabled     BOOLEAN NOT NULL DEFAULT true,
     insecure    BOOLEAN NOT NULL DEFAULT false,  -- http: 跳过 TLS 证书校验(自签证书场景, issue #108)
+    -- 这个 MCP 是干什么的：列表里直接显示，省得靠名字猜（Nuclei/WebPath 还好，
+    -- ScopeSentry/Burp 这类不看说明根本不知道要不要开）。
+    description TEXT NOT NULL DEFAULT '',
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -867,6 +870,24 @@ ALTER TABLE mcp_servers ADD CONSTRAINT mcp_servers_transport_check
     CHECK (transport IN ('stdio','http','sse'));
 -- 旧库补列(schema.sql 每次启动都会 Exec)。
 ALTER TABLE mcp_servers ADD COLUMN IF NOT EXISTS insecure BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE mcp_servers ADD COLUMN IF NOT EXISTS description TEXT NOT NULL DEFAULT '';
+-- 内置 MCP 的默认说明：只在说明为空时写入，用户改过的不覆盖。
+UPDATE mcp_servers SET description = '漏洞模板扫描（nuclei + 模板库），跑 POC 验证与批量探测'
+ WHERE name = 'Nuclei' AND description = '';
+UPDATE mcp_servers SET description = '子域枚举（subfinder），被动源查资产面'
+ WHERE name = 'Subfinder' AND description = '';
+UPDATE mcp_servers SET description = '敏感路径/目录探测，按字典找暴露面（默认走录制代理，便于入库）'
+ WHERE name = 'WebPath' AND description = '';
+UPDATE mcp_servers SET description = '拿 shell 后的会话管理：命令执行、文件上传下载、痕迹清理'
+ WHERE name = 'Webshell' AND description = '';
+UPDATE mcp_servers SET description = '回连监听与命中记录查看（DNS/HTTP OOB），验证盲打类漏洞'
+ WHERE name = 'OOB' AND description = '';
+UPDATE mcp_servers SET description = 'Playwright 浏览器自动化：页面访问、截图、JS 逆向与前端取证'
+ WHERE name = 'browser' AND description = '';
+UPDATE mcp_servers SET description = 'Burp Suite 的 MCP 接口：转发请求、查历史、做流量侧验证（需本机 Burp 开启 MCP）'
+ WHERE name = 'Burp' AND description = '';
+UPDATE mcp_servers SET description = 'ScopeSentry 平台接口：拉取资产清单做同步（需在配置里填 URL 与 API Key）'
+ WHERE name = 'ScopeSentry' AND description = '';
 DROP TRIGGER IF EXISTS trg_mcp_upd ON mcp_servers;
 CREATE TRIGGER trg_mcp_upd BEFORE UPDATE ON mcp_servers
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();

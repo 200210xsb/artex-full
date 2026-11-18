@@ -32,6 +32,7 @@ type FormState = {
   url: string;
   env: string;
   insecure: boolean;
+  description: string;
 };
 const emptyForm: FormState = {
   name: "",
@@ -41,6 +42,7 @@ const emptyForm: FormState = {
   url: "",
   env: "",
   insecure: false,
+  description: "",
 };
 
 export default function MCPPage() {
@@ -117,6 +119,7 @@ export default function MCPPage() {
       url: s.url ?? "",
       env: envToText(s.env),
       insecure: s.insecure ?? false,
+      description: s.description ?? "",
     });
     setTab("config");
     setOpen(true);
@@ -158,6 +161,7 @@ export default function MCPPage() {
               args: [] as string[],
               env: parseEnv(form.env), // 远程模式下 env 即请求头
               insecure: form.insecure,
+        description: form.description.trim(),
             }
           : {
               transport: "stdio" as const,
@@ -265,6 +269,16 @@ export default function MCPPage() {
             value={form.name}
             onChange={(e) => setF({ name: e.target.value })}
           />
+        </div>
+        <div className="grid gap-2">
+          <Label htmlFor="m-desc">说明（这个 MCP 是干什么的）</Label>
+          <Input
+            id="m-desc"
+            placeholder="例如：漏洞模板扫描（nuclei），跑 POC 验证与批量探测"
+            value={form.description}
+            onChange={(e) => setF({ description: e.target.value })}
+          />
+          <p className="text-muted-foreground text-xs">列表里直接显示，省得靠名字猜要不要开。</p>
         </div>
         {form.transport === "stdio" ? (
           <>
@@ -408,6 +422,9 @@ export default function MCPPage() {
             </CardHeader>
             <CardContent className="grid gap-3">
               <p className="text-muted-foreground text-sm">
+                {s.description?.trim() || "（没有填写说明）"}
+              </p>
+              <p className="text-muted-foreground text-xs">
                 {s.tools && s.tools.length > 0 ? `${s.tools.length} 个工具` : "尚未发现工具"}
               </p>
               <div className="grid gap-2" onClick={(e) => e.stopPropagation()}>

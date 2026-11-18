@@ -1212,6 +1212,7 @@ export interface MCPServer {
   url?: string;
   enabled: boolean;
   insecure?: boolean; // http: skip TLS cert verification (self-signed servers)
+  description?: string; // 这个 MCP 是干什么的（列表与编辑框都显示）
   tools?: string[]; // mcp_tools_cache (names only, for the count)
 }
 

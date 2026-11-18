@@ -35,6 +35,9 @@ import (
 // ErrUnsupported is returned on platforms without network namespaces.
 var ErrUnsupported = errors.New("当前平台不支持 VPN 出口（需要 Linux 网络命名空间）")
 
+// errStopRebuild 表示看门狗不该重建这条隧道（已停用/已回收）。
+var errStopRebuild = errors.New("停止重建")
+
 // Profile is one OpenVPN configuration plus the account in use.
 //
 // Key identifies a tunnel: the same .ovpn with a different account is a different
@@ -57,6 +60,10 @@ const (
 	StateUp       = "up"
 	StateError    = "error"
 )
+
+// idleTTL 是一条隧道"没人用"多久后回收。任务跑完不会显式通知隧道，靠这个兜底：
+// 不回收的话，每条隧道会一直占着命名空间、两个进程和约 45MB 内存。
+const idleTTL = 30 * time.Minute
 
 // Status is a snapshot of one profile's tunnel.
 type Status struct {
@@ -87,6 +94,8 @@ type Manager struct {
 	slots  map[int]bool // veth slot allocation, so subnets never collide
 	logf   func(string, ...any)
 	closed bool
+
+	janitorOnce sync.Once
 }
 
 // New returns a manager that keeps its generated files under dir. singbox may be
@@ -132,6 +141,7 @@ func (m *Manager) Ensure(ctx context.Context, p Profile) (string, error) {
 	inst.mu.Lock()
 	defer inst.mu.Unlock()
 	if inst.state == StateUp && inst.socksAddr != "" {
+		inst.lastUsed = time.Now()
 		return "socks5://" + inst.socksAddr, nil
 	}
 	if err := m.bringUp(ctx, inst); err != nil {
@@ -141,8 +151,10 @@ func (m *Manager) Ensure(ctx context.Context, p Profile) (string, error) {
 	}
 	inst.state = StateUp
 	inst.since = time.Now()
+	inst.lastUsed = time.Now()
 	inst.lastErr = ""
 	go m.monitor(inst)
+	m.startJanitor()
 	return "socks5://" + inst.socksAddr, nil
 }
 
@@ -242,6 +254,7 @@ type instance struct {
 	notes     []string
 	lastErr   string
 	since     time.Time
+	lastUsed  time.Time // 最近一次被任务取用；空闲回收据此判断
 	slot      int
 	closed    bool
 
@@ -320,13 +333,18 @@ func (m *Manager) monitor(inst *instance) {
 		err := func() error {
 			inst.mu.Lock()
 			defer inst.mu.Unlock()
-			if inst.closed {
-				return errors.New("closed")
+			// 期间可能被空闲回收（状态变 Stopped）或被显式停掉：都不该再拉起。
+			if inst.closed || inst.state != StateError {
+				return errStopRebuild
 			}
 			return m.bringUp(ctx, inst)
 		}()
 		cancel()
 		inst.mu.Lock()
+		if errors.Is(err, errStopRebuild) {
+			inst.mu.Unlock()
+			return
+		}
 		if err != nil {
 			inst.state = StateError
 			inst.lastErr = err.Error()
@@ -339,6 +357,58 @@ func (m *Manager) monitor(inst *instance) {
 		inst.lastErr = ""
 		inst.mu.Unlock()
 		fails = 0
+	}
+}
+
+// startJanitor 启动空闲回收循环（只启动一次）。
+func (m *Manager) startJanitor() {
+	m.janitorOnce.Do(func() {
+		go func() {
+			ticker := time.NewTicker(5 * time.Minute)
+			defer ticker.Stop()
+			for range ticker.C {
+				m.mu.Lock()
+				closed := m.closed
+				m.mu.Unlock()
+				if closed {
+					return
+				}
+				m.reapIdle()
+			}
+		}()
+	})
+}
+
+// reapIdle 停掉长时间没人用的隧道。
+func (m *Manager) reapIdle() {
+	m.mu.Lock()
+	keys := make([]string, 0, len(m.items))
+	for k := range m.items {
+		keys = append(keys, k)
+	}
+	m.mu.Unlock()
+	for _, k := range keys {
+		m.mu.Lock()
+		inst := m.items[k]
+		if inst == nil {
+			// 已被 Forget 掉，连带把条目删掉。
+			delete(m.items, k)
+			m.mu.Unlock()
+			continue
+		}
+		m.mu.Unlock()
+
+		inst.mu.Lock()
+		idle := inst.state == StateUp && !inst.lastUsed.IsZero() && time.Since(inst.lastUsed) > idleTTL
+		name := inst.profile.Name
+		inst.mu.Unlock()
+
+		if idle {
+			// Stop 会把状态置为 Stopped；monitor 重连前会重新检查状态，因此不会把
+			// 刚回收的隧道又拉起来。下次任务取用时 Ensure 会重建。
+			m.logf("[vpn] %s 空闲超过 %s，回收隧道（任务再跑时自动重连）", name, idleTTL)
+			m.Stop(k)
+		}
 	}
 }
 
