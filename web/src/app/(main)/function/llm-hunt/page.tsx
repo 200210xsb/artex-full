@@ -21,6 +21,7 @@ import { Label } from "@/components/ui/label";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
+import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import {
   Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "@/components/ui/table";
@@ -93,6 +94,11 @@ export default function LLMHuntPage() {
 
   const [provider, setProvider] = React.useState<string>("");
   const [onlyVerified, setOnlyVerified] = React.useState(false);
+  // 参考 trufflehog-explorer 的做法：按验证状态 / 来源 / 关键词筛选，点行看详情。
+  const [statusFilter, setStatusFilter] = React.useState<"all" | "valid" | "invalid" | "pending">("all");
+  const [srcFilter, setSrcFilter] = React.useState("");
+  const [q, setQ] = React.useState("");
+  const [detail, setDetail] = React.useState<LeakKey | null>(null);
   const [revealed, setRevealed] = React.useState<Record<number, string>>({});
   const [copied, setCopied] = React.useState<number | null>(null);
 
@@ -200,6 +206,19 @@ export default function LLMHuntPage() {
     URL.revokeObjectURL(a.href);
   };
 
+  const exportJson = () => {
+    const data = shown.map((k) => ({
+      type: k.key_type, masked: k.masked, verify: k.verify_state || "unverified",
+      source: k.source_kind ?? "target", url: k.repo || k.url, found_at: k.found_at,
+    }));
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `llm-keys-${new Date().toISOString().slice(0, 10)}.json`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  };
+
   const del = async (kind: "assets" | "keys", id: number) => {
     if (!confirm("确认删除这条记录？")) return;
     try {
@@ -212,7 +231,19 @@ export default function LLMHuntPage() {
 
   const last = status.last;
   const providers = Object.entries(stats?.by_provider ?? {}).sort((a, b) => b[1] - a[1]);
-  const shown = keys.filter((k) => (!provider || k.key_type === provider) && (!onlyVerified || k.verify_state === "valid"));
+  const shown = React.useMemo(() => {
+    const kw = q.trim().toLowerCase();
+    return keys.filter((k) => {
+      if (provider && k.key_type !== provider) return false;
+      if (onlyVerified && k.verify_state !== "valid") return false;
+      if (srcFilter && (k.source_kind ?? "target") !== srcFilter) return false;
+      if (statusFilter === "valid" && k.verify_state !== "valid") return false;
+      if (statusFilter === "invalid" && k.verify_state !== "invalid") return false;
+      if (statusFilter === "pending" && k.verify_state) return false;
+      if (kw && !JSON.stringify(k).toLowerCase().includes(kw)) return false;
+      return true;
+    });
+  }, [keys, provider, onlyVerified, srcFilter, statusFilter, q]);
 
   return (
     <div className="mx-auto flex min-h-0 w-full max-w-[1440px] flex-1 flex-col gap-4">
@@ -322,27 +353,45 @@ export default function LLMHuntPage() {
         <TabsContent value="keys" className="min-h-0 flex-1 overflow-auto">
           <Card>
             <CardContent className="space-y-3 pt-4">
-              <div className="flex flex-wrap items-center gap-2">
-                <button
-                  onClick={() => setProvider("")}
-                  className={cn("rounded-full border px-2.5 py-0.5 text-[11px]",
-                    provider === "" ? "border-primary text-foreground" : "text-muted-foreground")}
-                >
+              {/* 筛选条：厂商 / 来源 / 状态 / 关键词 */}
+              <div className="flex flex-wrap items-center gap-1.5">
+                <FilterChip active={provider === ""} onClick={() => setProvider("")}>
                   全部 {stats?.total ?? 0}
-                </button>
+                </FilterChip>
                 {providers.map(([p, n]) => (
-                  <button key={p} onClick={() => setProvider(p === provider ? "" : p)}
-                    className={cn("rounded-full border px-2.5 py-0.5 text-[11px]",
-                      provider === p ? "border-primary text-foreground" : "text-muted-foreground")}>
+                  <FilterChip key={p} active={provider === p} onClick={() => setProvider(p === provider ? "" : p)}>
                     {p} {n}
-                  </button>
+                  </FilterChip>
                 ))}
-                <label className="ml-auto flex items-center gap-2 text-xs text-muted-foreground">
+                <span className="mx-1 h-4 w-px bg-border" />
+                <FilterChip active={srcFilter === ""} onClick={() => setSrcFilter("")}>全部来源</FilterChip>
+                {Object.entries(stats?.by_source ?? {}).map(([src, n]) => (
+                  <FilterChip key={src} active={srcFilter === src} onClick={() => setSrcFilter(srcFilter === src ? "" : src)}>
+                    {SOURCE_LABEL[src] ?? src} {n}
+                  </FilterChip>
+                ))}
+                <span className="mx-1 h-4 w-px bg-border" />
+                <FilterChip active={statusFilter === "all"} onClick={() => setStatusFilter("all")}>全部状态</FilterChip>
+                <FilterChip active={statusFilter === "valid"} onClick={() => setStatusFilter("valid")}>有效 {stats?.verified ?? 0}</FilterChip>
+                <FilterChip active={statusFilter === "pending"} onClick={() => setStatusFilter("pending")}>未验证</FilterChip>
+                <FilterChip active={statusFilter === "invalid"} onClick={() => setStatusFilter("invalid")}>无效</FilterChip>
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2">
+                <div className="relative min-w-56 flex-1">
+                  <SearchIcon className="pointer-events-none absolute top-1/2 left-2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+                  <Input value={q} onChange={(e) => setQ(e.target.value)}
+                    placeholder="搜索：掩码 / 来源地址 / 仓库" className="h-8 pl-7 text-xs" />
+                </div>
+                <label className="flex items-center gap-2 text-xs text-muted-foreground">
                   <Switch checked={onlyVerified} onCheckedChange={setOnlyVerified} size="sm" />
                   只看有效
                 </label>
                 <Button size="sm" variant="outline" onClick={exportCsv} disabled={shown.length === 0}>
-                  <CopyIcon className="size-3.5" /> 导出 CSV
+                  <CopyIcon className="size-3.5" /> CSV
+                </Button>
+                <Button size="sm" variant="outline" onClick={exportJson} disabled={shown.length === 0}>
+                  JSON
                 </Button>
                 <Button size="sm" variant="outline" onClick={verifyPending} disabled={status.running}>
                   <ShieldCheckIcon className="size-3.5" /> 验证未验证的
@@ -371,7 +420,7 @@ export default function LLMHuntPage() {
                     shown.map((k) => {
                       const v = VERIFY_LABEL[k.verify_state ?? ""] ?? VERIFY_LABEL[""];
                       return (
-                        <TableRow key={k.id}>
+                        <TableRow key={k.id} className="cursor-pointer" onClick={() => setDetail(k)}>
                           <TableCell className="text-xs">{k.key_type}</TableCell>
                           <TableCell className="font-mono text-xs">
                             {revealed[k.id] ? <span className="text-destructive break-all">{revealed[k.id]}</span> : k.masked}
@@ -387,7 +436,7 @@ export default function LLMHuntPage() {
                             {(k.found_at ?? "").replace("T", " ").slice(0, 19)}
                           </TableCell>
                           <TableCell>
-                            <div className="flex gap-1">
+                            <div className="flex gap-1" onClick={(e) => e.stopPropagation()}>
                               <Button variant="ghost" size="icon" title="复制掩码" onClick={() => copyMasked(k)}>
                                 <CopyIcon className={cn("size-3.5", copied === k.id && "text-emerald-500")} />
                               </Button>
@@ -454,7 +503,65 @@ export default function LLMHuntPage() {
           </Card>
         </TabsContent>
       </Tabs>
+
+      {/* 详情抽屉：点任意一行看完整上下文（参考 interactsh / trufflehog-explorer 的主从布局） */}
+      <Sheet open={!!detail} onOpenChange={(o) => !o && setDetail(null)}>
+        <SheetContent className="flex w-full flex-col gap-4 overflow-y-auto sm:max-w-lg">
+          <SheetHeader>
+            <SheetTitle className="flex items-center gap-2 text-sm">
+              {detail?.key_type}
+              <span className={cn("rounded px-1.5 py-0.5 text-[11px]", VERIFY_LABEL[detail?.verify_state ?? ""]?.cls)}>
+                {VERIFY_LABEL[detail?.verify_state ?? ""]?.text}
+              </span>
+            </SheetTitle>
+            <SheetDescription className="font-mono text-xs">{detail?.masked}</SheetDescription>
+          </SheetHeader>
+
+          <dl className="space-y-3 text-xs">
+            <Row label="来源类型" value={SOURCE_LABEL[detail?.source_kind ?? "target"] ?? detail?.source_kind ?? "-"} />
+            <Row label="来源地址" value={detail?.repo || detail?.url || "-"} mono />
+            <Row label="发现时间" value={(detail?.found_at ?? "").replace("T", " ").slice(0, 19) || "-"} />
+            {detail?.verify_note ? <Row label="验证说明" value={detail.verify_note} /> : null}
+          </dl>
+
+          <div className="mt-auto flex flex-wrap gap-2">
+            <Button size="sm" variant="outline" onClick={() => detail && reveal(detail)}>
+              <SearchIcon className="size-3.5" /> 查看原文
+            </Button>
+            <Button size="sm" variant="outline" onClick={() => detail && copyMasked(detail)}>
+              <CopyIcon className="size-3.5" /> 复制掩码
+            </Button>
+            <Button size="sm" variant="ghost" className="text-destructive"
+              onClick={async () => { if (detail) { await del("keys", detail.id); setDetail(null); } }}>
+              <Trash2Icon className="size-3.5" /> 删除
+            </Button>
+          </div>
+        </SheetContent>
+      </Sheet>
     </div>
+  );
+}
+
+function Row({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
+  return (
+    <div className="grid grid-cols-[80px_1fr] gap-2">
+      <dt className="text-muted-foreground">{label}</dt>
+      <dd className={cn("break-all", mono && "font-mono")}>{value}</dd>
+    </div>
+  );
+}
+
+function FilterChip({ active, onClick, children }: { active: boolean; onClick: () => void; children: React.ReactNode }) {
+  return (
+    <button
+      onClick={onClick}
+      className={cn(
+        "rounded-full border px-2.5 py-0.5 text-[11px] transition-colors",
+        active ? "border-primary bg-primary/10 text-foreground" : "border-border text-muted-foreground hover:text-foreground",
+      )}
+    >
+      {children}
+    </button>
   );
 }
 
