@@ -18,7 +18,10 @@ func (s *stdioCloser) Close() error {
 		s.stdin.Close()
 	}
 	if s.cmd != nil && s.cmd.Process != nil {
-		_ = s.cmd.Process.Kill()
+		// Kill the whole process group, not just the direct child: a stdio
+		// server started via npx forks npm → node, and killing the launcher
+		// alone leaves those behind in ARTEX's cgroup.
+		killProcessGroup(s.cmd)
 		_ = s.cmd.Wait()
 	}
 	return nil
@@ -31,6 +34,8 @@ func (s *stdioCloser) Close() error {
 // applied on top of the parent process environment; pass nil for none.
 func NewStdioClient(ctx context.Context, server, command string, env map[string]string, args ...string) (*Client, error) {
 	cmd := exec.Command(command, args...)
+	// Own process group so Close can reap the launcher *and* its children.
+	prepareProcessGroup(cmd)
 	if len(env) > 0 {
 		cmd.Env = os.Environ()
 		for k, v := range env {

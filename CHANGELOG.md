@@ -2,6 +2,24 @@
 
 本项目的重要变更记录在此文件中，格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [0.4.5] - 2026-11-18
+
+修「后端进程活着但整个服务不可用」的第二个根因：**MCP 子进程泄漏**。
+
+浏览器 MCP 通过 `npx @playwright/mcp` 启动，进程树是 `npx → npm → node`；
+`stdioCloser.Close()` 原来只 `Kill()` 直接子进程，于是 `node` 被 init 收养却仍
+留在 ARTEX 的 cgroup 里。叠加两个放大因素——任务并发上限没开（23 个任务同时跑、
+每个 3 worker、每个 worker 各起一套 8 个 MCP 服务器），以及 LLM 配置 403 让任务
+反复重试永不结束——几分钟就攒到几百个进程、1.7G 打满 cgroup、3.9G swap 抖动，
+最后连 `/api/health` 都超时，页面只剩「无法连接到后端服务」。
+
+- `norma/mcp`：MCP 服务器改为**独立进程组**（`Setpgid`），`Close()` 用
+  `kill(-pgid, SIGKILL)` 整组收掉，`npm`/`node` 不再漏；Windows 下退化为杀直接
+  子进程（没有 POSIX 进程组）。补测试构造 `sh → sleep` 的祖孙进程，断言整组消失；
+- 新增 `watchdog.sh` + systemd timer：健康检查连续失败 3 次、cgroup 进程数
+  >120、内存 ≥90% 三个条件任一命中就重启，把「等人发现」变成「自己恢复」；
+- 新增 `docs/运维-守护与自愈.md`：两类事故的症状、排查顺序、修复动作和阈值。
+
 ## [0.4.4] - 2026-11-18
 
 修一次把后端拖垮的磁盘事故：`llm_records` 表把数据盘写满，PostgreSQL 掉进崩溃循环，
