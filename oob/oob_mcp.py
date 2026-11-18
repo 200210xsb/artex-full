@@ -404,11 +404,25 @@ CREATE TABLE IF NOT EXISTS hits (
     headers     TEXT,
     body        TEXT,
     body_len    INTEGER,
-    truncated   INTEGER DEFAULT 0
+    truncated   INTEGER DEFAULT 0,
+    origin      TEXT DEFAULT 'payload'
 );
 CREATE INDEX IF NOT EXISTS idx_hits_session ON hits(session_id, id);
 CREATE INDEX IF NOT EXISTS idx_hits_ts ON hits(ts);
 """
+
+def _migrate(conn):
+    """给老库补 origin 列：sqlite 的 ADD COLUMN 没有 IF NOT EXISTS。"""
+    try:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(hits)").fetchall()}
+        if "origin" not in cols:
+            conn.execute("ALTER TABLE hits ADD COLUMN origin TEXT DEFAULT 'payload'")
+            conn.commit()
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_hits_origin ON hits(origin, ts)")
+        conn.commit()
+    except Exception as e:
+        log("迁移 origin 列失败: %s: %s" % (type(e).__name__, e))
+
 
 _init_lock = threading.Lock()
 _inited = False
@@ -423,6 +437,7 @@ def init_db():
         try:
             conn.executescript(SCHEMA)
             conn.commit()
+            _migrate(conn)
         finally:
             conn.close()
         _inited = True
@@ -453,7 +468,7 @@ _listener_state = {
 
 
 def record_hit(session_id, token, variant, method, host, path, query,
-               remote_ip, remote_port, ua, headers, body, truncated):
+               remote_ip, remote_port, ua, headers, body, truncated, origin="payload"):
     """写一条命中；超限或异常都不得影响收包。"""
     try:
         conn = db()
@@ -465,17 +480,50 @@ def record_hit(session_id, token, variant, method, host, path, query,
                 return
             conn.execute(
                 "INSERT INTO hits(session_id,token,variant,ts,method,scheme,host,path,"
-                "query,remote_ip,remote_port,ua,headers,body,body_len,truncated) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "query,remote_ip,remote_port,ua,headers,body,body_len,truncated,origin) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (session_id, token, variant, now_ts(), method, "http", host, path,
                  query, remote_ip, remote_port, ua, headers, body,
-                 len(body or ""), 1 if truncated else 0),
+                 len(body or ""), 1 if truncated else 0, origin),
             )
             conn.commit()
         finally:
             conn.close()
     except Exception as e:
         log("写命中失败: %s: %s" % (type(e).__name__, e))
+
+
+# 外部来访记录上限与去重窗口：扫描器会重复打同一个路径，没必要每条都存。
+MAX_EXTERNAL_HITS = 300
+EXTERNAL_DEDUP_WINDOW = 600  # 秒
+
+
+def record_external(method, host, path, query, remote_ip, remote_port, ua,
+                    headers, body, truncated):
+    """把「非本平台投递」的访问单独记下来，session_id 统一为 ext。"""
+    try:
+        conn = db()
+        try:
+            total = conn.execute(
+                "SELECT COUNT(*) FROM hits WHERE origin='external'"
+            ).fetchone()[0]
+            if total >= MAX_EXTERNAL_HITS:
+                return
+            dup = conn.execute(
+                "SELECT 1 FROM hits WHERE origin='external' AND remote_ip=? AND path=? "
+                "AND ts > ? LIMIT 1",
+                (remote_ip, path, now_ts() - EXTERNAL_DEDUP_WINDOW),
+            ).fetchone()
+            if dup:
+                return
+        finally:
+            conn.close()
+        record_hit(session_id="ext", token="", variant=None, method=method, host=host,
+                   path=path, query=query, remote_ip=remote_ip, remote_port=remote_port,
+                   ua=ua, headers=headers, body=body, truncated=truncated,
+                   origin="external")
+    except Exception as e:
+        log("写外部来访失败: %s: %s" % (type(e).__name__, e))
 
 
 class OobHandler(BaseHTTPRequestHandler):
@@ -552,6 +600,16 @@ class OobHandler(BaseHTTPRequestHandler):
                     log("噪音(无token): %s %s from %s UA=%s" % (
                         self.command, self.path, self.client_address[0],
                         brief(self.headers.get("User-Agent"), 80)))
+                # 外部未知来访：别人扫到我们的 OOB 地址主动连进来。
+                # 这类记录对值守很有价值（能看出监听器已被扫到），但要限量，
+                # 否则一个扫描器就能把库刷爆。
+                record_external(method=self.command, host=self.headers.get("Host") or "",
+                                path=path, query=query,
+                                remote_ip=self.client_address[0],
+                                remote_port=self.client_address[1],
+                                ua=self.headers.get("User-Agent") or "",
+                                headers=json.dumps(hdrs, ensure_ascii=False),
+                                body=body_text, truncated=truncated)
                 return
 
             # token 必须存在于会话表，否则按噪音计（防止扫描器随机路径刷库）
@@ -564,6 +622,14 @@ class OobHandler(BaseHTTPRequestHandler):
                 conn.close()
             if not row:
                 _listener_state["noise"] += 1
+                # token 是我们的格式但会话已关闭/不存在：同样按外部来访记录
+                record_external(method=self.command, host=self.headers.get("Host") or "",
+                                path=path, query=query,
+                                remote_ip=self.client_address[0],
+                                remote_port=self.client_address[1],
+                                ua=self.headers.get("User-Agent") or "",
+                                headers=json.dumps(hdrs, ensure_ascii=False),
+                                body=body_text, truncated=truncated)
                 return
 
             record_hit(

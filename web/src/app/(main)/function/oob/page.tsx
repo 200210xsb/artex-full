@@ -24,11 +24,13 @@ import {
   EyeIcon,
   FileTextIcon,
   GlobeIcon,
+  HelpCircleIcon,
   Loader2Icon,
   PauseIcon,
   PlayIcon,
   RadioIcon,
   RefreshCwIcon,
+  SearchIcon,
   ShieldAlertIcon,
   TriangleAlertIcon,
   WifiIcon,
@@ -50,6 +52,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { Input } from "@/components/ui/input";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { cn } from "@/lib/utils";
 import { api } from "@/lib/api";
@@ -183,9 +186,15 @@ export default function OOBPage() {
   const [payloadWarn, setPayloadWarn] = React.useState("");
   const [detail, setDetail] = React.useState<OOBHitDetail | null>(null);
   const [detailLoading, setDetailLoading] = React.useState(false);
-  const [auto, setAuto] = React.useState(true);
+  // 自动刷新间隔：0 = 关闭。按规格做成下拉，值守时按需调。
+  const [pollMs, setPollMs] = React.useState(3000);
   const [busy, setBusy] = React.useState(false);
   const [tab, setTab] = React.useState("ledger");
+  // 会话来源筛选与分组折叠
+  const [originFilter, setOriginFilter] = React.useState<"all" | "mine" | "ext">("all");
+  const [openMine, setOpenMine] = React.useState(true);
+  const [openExt, setOpenExt] = React.useState(true);
+  const [sq, setSq] = React.useState("");
 
   const current = React.useMemo(
     () => sessions.find((s) => s.id === sid) ?? null,
@@ -210,10 +219,10 @@ export default function OOBPage() {
   }, [loadTop]);
 
   React.useEffect(() => {
-    if (!auto) return;
-    const t = setInterval(loadTop, POLL_MS);
+    if (!pollMs) return;
+    const t = setInterval(loadTop, pollMs);
     return () => clearInterval(t);
-  }, [auto, loadTop]);
+  }, [pollMs, loadTop]);
 
   // 选中会话后拉命中流 + 能力判定 + 载荷。
   const loadSession = React.useCallback(async (id: string) => {
@@ -244,10 +253,10 @@ export default function OOBPage() {
 
   // 自动刷新时命中流也要跟着动，否则左边涨了右边不动。
   React.useEffect(() => {
-    if (!auto || !sid) return;
-    const t = setInterval(() => loadSession(sid), POLL_MS);
+    if (!pollMs || !sid) return;
+    const t = setInterval(() => loadSession(sid), pollMs);
     return () => clearInterval(t);
-  }, [auto, sid, loadSession]);
+  }, [pollMs, sid, loadSession]);
 
   const openDetail = async (hitId: number) => {
     setDetailLoading(true);
@@ -272,6 +281,17 @@ export default function OOBPage() {
 
   const notReady = ov && !ov.available;
 
+  // 会话筛选：来源（我的载荷 / 外部来访）+ 关键词
+  const visibleSessions = React.useMemo(() => {
+    const k = sq.trim().toLowerCase();
+    return sessions.filter((s) => {
+      if (originFilter === "mine" && s.id === "ext") return false;
+      if (originFilter === "ext" && s.id !== "ext") return false;
+      if (k && !(`${s.label} ${s.id}`.toLowerCase().includes(k))) return false;
+      return true;
+    });
+  }, [sessions, originFilter, sq]);
+
   return (
     <div className="mx-auto flex min-h-0 w-full max-w-[1500px] flex-1 flex-col gap-4">
       {/* Header */}
@@ -279,24 +299,37 @@ export default function OOBPage() {
         <div className="flex items-center gap-2">
           <RadioIcon className="h-5 w-5 text-muted-foreground" />
           <h1 className="text-xl font-semibold tracking-tight">回连监听</h1>
-          <Badge variant="secondary">{sessions.length} 会话</Badge>
-          {ov && ov.hits > 0 ? (
-            <Badge variant="outline" className="font-mono tabular-nums">
-              {ov.hits} 次回连
-            </Badge>
-          ) : null}
+          <Badge variant="secondary" className="font-mono text-[10px] tabular-nums">
+            {sessions.length} 会话
+          </Badge>
+          <Badge variant="outline" className="font-mono text-[10px] tabular-nums">
+            {ov?.hits ?? 0} 回连
+          </Badge>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="size-6 text-muted-foreground"
+            aria-label="说明"
+            title={"回连台账：按会话查看命中流。\n来源标记：本地自发包=我们自己投递的载荷回连；外部未知来访=没带我们 token 的访问（扫描器/测绘）。\n能力判定：根据回连行为推断目标客户端能力。\n投喂载荷：给该会话生成可直接投递的 URL。"}
+          >
+            <HelpCircleIcon className="size-3.5" />
+          </Button>
         </div>
         <div className="ml-4 flex items-center gap-2">
-          <Button
-            variant={auto ? "secondary" : "ghost"}
-            size="sm"
-            className="h-8"
-            onClick={() => setAuto((v) => !v)}
-            title={auto ? "点击暂停自动刷新" : "点击恢复自动刷新"}
-          >
-            {auto ? <PauseIcon className="size-3.5" /> : <PlayIcon className="size-3.5" />}
-            {auto ? `每 ${POLL_MS / 1000}s` : "已暂停"}
-          </Button>
+          <div className="flex items-center gap-1.5">
+            <RefreshCwIcon className={cn("size-3.5", pollMs ? "text-muted-foreground" : "text-muted-foreground/40")} />
+            <select
+              value={String(pollMs)}
+              onChange={(e) => setPollMs(Number(e.target.value))}
+              className="h-8 rounded-md border bg-transparent px-2 text-xs text-muted-foreground outline-none"
+              aria-label="自动刷新间隔"
+            >
+              <option value="0">关闭</option>
+              <option value="3000">3s</option>
+              <option value="5000">5s</option>
+              <option value="10000">10s</option>
+            </select>
+          </div>
           {ov?.public_host ? (
             <CopyButton
               text={`${ov.public_host}${ov.ports?.length ? ":" + ov.ports[0] : ""}`}
@@ -320,8 +353,7 @@ export default function OOBPage() {
           tone={ov && !ov.public_host ? "warn" : undefined} />
         <StatCard icon={<ActivityIcon className="size-3.5" />} label="会话 / 活跃" weight={1.6}
           value={`${ov?.sessions ?? 0} / ${ov?.active ?? 0}`} hint="累计 / 未关闭" />
-        <StatCard icon={<ZapIcon className="size-3.5" />} label="回连总数" weight={1.3}
-          value={String(ov?.hits ?? 0)} hint="所有会话累计" />
+
         <StatCard icon={<ClockIcon className="size-3.5" />} label="今日回连" weight={0.8}
           value={String(ov?.hits_today ?? 0)} hint={ov?.last_hit ? `最近 ${fmtAgo(ov.last_hit)}` : "暂无"} />
         <StatCard icon={<FileTextIcon className="size-3.5" />} label="库大小" weight={0.8}
@@ -372,57 +404,101 @@ export default function OOBPage() {
           <TabsContent value="ledger" className="mt-0 min-h-0 flex-1">
             <div className="grid min-h-0 h-full grid-cols-1 gap-4 lg:grid-cols-[minmax(260px,320px)_1fr]">
               <Card className="flex min-h-0 flex-col overflow-hidden">
-                <CardHeader className="pb-2">
-                  <CardTitle className="text-sm">会话</CardTitle>
-                  <CardDescription className="text-xs">
-                    agent 发起或手工登记，一条会话对应一批载荷
-                  </CardDescription>
+                <CardHeader className="gap-2 pb-2">
+                  <CardTitle className="flex items-center gap-2 text-sm">
+                    会话
+                    <span className="font-mono text-[10px] font-normal text-muted-foreground tabular-nums">
+                      {sessions.length}
+                    </span>
+                  </CardTitle>
+                  <div className="flex items-center gap-2">
+                    <div className="relative min-w-0 flex-1">
+                      <SearchIcon className="pointer-events-none absolute top-1/2 left-2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+                      <Input
+                        value={sq}
+                        onChange={(e) => setSq(e.target.value)}
+                        placeholder="搜索会话 / ID"
+                        className="h-8 pl-7 text-xs"
+                      />
+                    </div>
+                    <select
+                      value={originFilter}
+                      onChange={(e) => setOriginFilter(e.target.value as "all" | "mine" | "ext")}
+                      className="h-8 rounded-md border bg-transparent px-2 text-xs text-muted-foreground outline-none"
+                      aria-label="按来源筛选"
+                    >
+                      <option value="all">全部</option>
+                      <option value="mine">我的载荷</option>
+                      <option value="ext">外部来访</option>
+                    </select>
+                  </div>
                 </CardHeader>
                 <CardContent className="min-h-0 flex-1 p-0">
                   <ScrollArea className="h-full">
-                    {sessions.length === 0 ? (
-                      <p className="px-4 py-6 text-center text-xs text-muted-foreground">暂无会话</p>
+                    {visibleSessions.length === 0 ? (
+                      <div className="px-4 py-8 text-center">
+                        <p className="text-xs font-medium">还没有会话</p>
+                        <p className="mt-1 text-[11px] text-muted-foreground">
+                          用「投喂载荷」生成一条 URL 投出去，命中后这里会出现会话
+                        </p>
+                      </div>
                     ) : (
-                      <div className="divide-y">
-                        {sessions.map((s) => (
+                      <div>
+                        {(["mine", "ext"] as const).map((group) => {
+                          const items = visibleSessions.filter((x) => (group === "ext" ? x.id === "ext" : x.id !== "ext"));
+                          if (group === "mine" && originFilter === "ext") return null;
+                          if (group === "ext" && originFilter === "mine") return null;
+                          if (group === "ext" && items.length === 0) return null;
+                          const open = group === "mine" ? openMine : openExt;
+                          return (
+                            <div key={group}>
+                              <button
+                                type="button"
+                                onClick={() => (group === "mine" ? setOpenMine((v) => !v) : setOpenExt((v) => !v))}
+                                className="flex w-full items-center gap-2 border-y bg-muted/30 px-3 py-1.5 text-[11px] font-medium text-muted-foreground"
+                              >
+                                <ChevronRightIcon className={cn("size-3 transition-transform", open && "rotate-90")} />
+                                {group === "mine" ? "我的载荷会话" : "外部未知来访会话"}
+                                <span className="tabular-nums text-muted-foreground/60">{items.length}</span>
+                              </button>
+                              {open
+                                ? items.map((s) => (
                           <button
                             key={s.id}
                             type="button"
                             onClick={() => setSid(s.id)}
+                            title={`${s.label || s.id}\n${s.id}${s.remote_ips?.length ? "\n来源 IP: " + s.remote_ips.join(", ") : ""}`}
                             className={cn(
-                              "flex w-full flex-col gap-1.5 px-3 py-3 text-left transition-colors hover:bg-muted/60",
+                              "flex h-9 w-full items-center gap-2 px-3 text-left transition-colors hover:bg-muted/60",
                               s.id === sid && "bg-primary/10 ring-1 ring-primary/25 ring-inset",
                             )}
                           >
-                            <div className="flex items-center gap-2">
-                              <LevelBadge level={s.level} name={s.level_name} />
-                              <span className="min-w-0 flex-1 truncate text-xs font-medium" title={s.label || s.id}>
-                                {s.label || s.id}
-                              </span>
-                              <span className="ml-auto shrink-0 font-mono text-[10px] tabular-nums text-muted-foreground">
-                                {s.hit_count}
-                              </span>
-                            </div>
-                            <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
-                              <span className="truncate font-mono">{s.id}</span>
-                              <span className="ml-auto shrink-0">
-                                {s.active ? (
-                                  <span className="flex items-center gap-1 text-emerald-600 dark:text-emerald-400">
-                                    <CircleIcon className="size-1.5 fill-current" />
-                                    活跃
-                                  </span>
-                                ) : (
-                                  "已关闭"
-                                )}
-                              </span>
-                            </div>
-                            {s.remote_ips.length > 0 ? (
-                              <div className="truncate font-mono text-[10px] text-muted-foreground/80">
-                                {s.remote_ips.join(", ")}
-                              </div>
-                            ) : null}
+                            <LevelBadge level={s.level} name={s.level_name} />
+                            <span className="min-w-0 flex-1 truncate text-xs font-medium" title={s.label || s.id}>
+                              {s.label || s.id}
+                            </span>
+                            <span className="hidden shrink-0 font-mono text-[10px] text-muted-foreground/60 sm:inline">
+                              {s.id}
+                            </span>
+                            <span
+                              className={cn(
+                                "shrink-0 rounded border px-1.5 py-0.5 text-[10px] leading-none",
+                                s.id === "ext"
+                                  ? "border-red-500/40 bg-red-500/10 text-red-600 dark:text-red-400"
+                                  : "border-emerald-500/40 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400",
+                              )}
+                            >
+                              {s.id === "ext" ? "外部未知来访" : "本地自发包"}
+                            </span>
+                            <span className="shrink-0 font-mono text-[10px] tabular-nums text-muted-foreground">
+                              {s.hit_count}
+                            </span>
                           </button>
-                        ))}
+                                ))
+                                : null}
+                            </div>
+                          );
+                        })}
                       </div>
                     )}
                   </ScrollArea>
@@ -454,17 +530,32 @@ export default function OOBPage() {
                   <CardContent className="min-h-0 flex-1 p-0">
                     <ScrollArea className="h-full">
                       {hits.length === 0 ? (
-                        <p className="px-4 py-8 text-center text-xs text-muted-foreground">
-                          该会话还没有回连。把载荷投到目标后，命中会实时出现在这里。
-                        </p>
+                        <div className="px-4 py-10 text-center">
+                          {current?.id === "ext" ? (
+                            <>
+                              <p className="text-xs font-medium">检测到非本平台发起的外部访问</p>
+                              <p className="mt-1 text-[11px] text-muted-foreground">
+                                监听端口被扫描或被测绘时会出现在这里；注意确认是否已暴露。
+                              </p>
+                            </>
+                          ) : (
+                            <>
+                              <p className="text-xs font-medium">还没有回连记录</p>
+                              <p className="mt-1 text-[11px] text-muted-foreground">
+                                等待回连命中——把载荷投到目标后，命中会实时出现在这里。
+                              </p>
+                            </>
+                          )}
+                        </div>
                       ) : (
                         <Table>
                           <TableHeader className="sticky top-0 z-10 bg-card">
                             <TableRow className="[&>th]:h-9 [&>th]:text-[11px] [&>th]:font-semibold [&>th]:text-foreground/80">
                               <TableHead className="w-[92px] shrink-0">时间</TableHead>
-                              <TableHead className="w-[108px] shrink-0">变体</TableHead>
-                              <TableHead className="w-[132px] shrink-0">来源 IP</TableHead>
-                              <TableHead className="min-w-0">请求</TableHead>
+                              <TableHead className="w-[104px] shrink-0">来源</TableHead>
+                              <TableHead className="w-[128px] shrink-0">来源 IP</TableHead>
+                              <TableHead className="w-[96px] shrink-0">变体</TableHead>
+                              <TableHead className="min-w-0">请求路径</TableHead>
                               <TableHead className="w-[132px] shrink-0">客户端</TableHead>
                             </TableRow>
                           </TableHeader>
@@ -480,6 +571,18 @@ export default function OOBPage() {
                               >
                                 <TableCell className="font-mono text-[11px] tabular-nums text-muted-foreground">
                                   {fmtTS(h.ts, false)}
+                                </TableCell>
+                                <TableCell>
+                                  <span
+                                    className={cn(
+                                      "rounded border px-1.5 py-0.5 text-[10px] leading-none",
+                                      h.origin === "external"
+                                        ? "border-red-500/40 bg-red-500/10 text-red-600 dark:text-red-400"
+                                        : "border-emerald-500/40 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400",
+                                    )}
+                                  >
+                                    {h.origin === "external" ? "外部来访" : "自发包"}
+                                  </span>
                                 </TableCell>
                                 <TableCell>
                                   <span className={cn(

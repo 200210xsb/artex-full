@@ -2140,6 +2140,8 @@ export interface OOBHit {
   ua: string;
   body_len: number;
   truncated: boolean;
+  /** payload = 我们自己投的载荷回连；external = 外部未知来访 */
+  origin: string;
 }
 
 export interface OOBHitDetail {

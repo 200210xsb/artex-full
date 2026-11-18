@@ -132,8 +132,10 @@ type oobHit struct {
 	UA         string  `json:"ua"`
 	BodyLen    int     `json:"body_len"`
 	Truncated  bool    `json:"truncated"`
-	Headers    string  `json:"-"`
-	Body       string  `json:"-"`
+	// Origin 区分「我们自己投的载荷回连」(payload) 与「外部未知来访」(external)。
+	Origin  string `json:"origin"`
+	Headers string `json:"-"`
+	Body    string `json:"-"`
 }
 
 type oobSession struct {
@@ -375,6 +377,11 @@ func (s *Server) oobSessions(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, err.Error())
 		return
 	}
+	// 外部未知来访（没带我们 token 的访问）单独合成一个会话，界面上与自有载荷分开。
+	// oob-listen 只对这类访问记一条去重后的样本（默认上限 300 条），不会刷屏。
+	if ext, ok := oobExternalSession(db); ok {
+		list = append(list, ext)
+	}
 	writeJSON(w, 200, map[string]any{"sessions": list, "available": true})
 }
 
@@ -397,7 +404,7 @@ func (s *Server) oobHits(w http.ResponseWriter, r *http.Request) {
 	sqlStr := `SELECT id, session_id, COALESCE(variant,''), ts, COALESCE(method,''),
 		COALESCE(scheme,''), COALESCE(host,''), COALESCE(path,''), COALESCE(query,''),
 		COALESCE(remote_ip,''), COALESCE(remote_port,0), COALESCE(ua,''),
-		COALESCE(body_len,0), COALESCE(truncated,0)
+		COALESCE(body_len,0), COALESCE(truncated,0), COALESCE(origin,'payload')
 		FROM hits`
 	args := []any{}
 	if sessionID != "" {
@@ -420,7 +427,7 @@ func (s *Server) oobHits(w http.ResponseWriter, r *http.Request) {
 		var truncated int
 		if err := rows.Scan(&h.ID, &h.SessionID, &h.Variant, &h.TS, &h.Method, &h.Scheme,
 			&h.Host, &h.Path, &h.Query, &h.RemoteIP, &h.RemotePort, &h.UA,
-			&h.BodyLen, &truncated); err != nil {
+			&h.BodyLen, &truncated, &h.Origin); err != nil {
 			writeErr(w, 500, err.Error())
 			return
 		}
@@ -650,4 +657,66 @@ func oobIPVariants(host string) []oobIPVariant {
 			"每段八进制，老牌绕过手法。"},
 		{"IPv6 映射", fmt.Sprintf("::ffff:%s", host), "IPv4-mapped IPv6，正则常漏。"},
 	}
+}
+
+// externalSessionID 是「外部未知来访」的合成会话 ID。
+const externalSessionID = "ext"
+
+// oobExternalSession 从 external 命中里合成一个会话，没有则返回 ok=false。
+func oobExternalSession(db *sql.DB) (oobSession, bool) {
+	var cnt int
+	var last, first float64
+	var ips, uas, paths, methods []string
+	row := db.QueryRow(`SELECT COUNT(*), COALESCE(MAX(ts),0), COALESCE(MIN(ts),0)
+		FROM hits WHERE COALESCE(origin,'payload')='external'`)
+	if err := row.Scan(&cnt, &last, &first); err != nil || cnt == 0 {
+		return oobSession{}, false
+	}
+	// 取前若干条用于展示「谁在扫我们」
+	rows, err := db.Query(`SELECT COALESCE(remote_ip,''), COALESCE(ua,''), COALESCE(path,'')
+		FROM hits WHERE COALESCE(origin,'payload')='external' ORDER BY id DESC LIMIT 20`)
+	if err == nil {
+		defer rows.Close()
+		for rows.Next() {
+			var ip, ua, p string
+			if rows.Scan(&ip, &ua, &p) != nil {
+				continue
+			}
+			if ip != "" {
+				ips = appendUnique(ips, ip)
+			}
+			if ua != "" {
+				uas = appendUnique(uas, ua)
+			}
+			if p != "" {
+				paths = appendUnique(paths, p)
+			}
+		}
+	}
+	_ = methods
+	return oobSession{
+		ID:        externalSessionID,
+		Label:     "外部未知来访",
+		Note:      "没有携带本平台 token 的访问：可能是扫描器扫到了监听端口，也可能是资产测绘在探测",
+		CreatedAt: first,
+		HitCount:  cnt,
+		LastHit:   last,
+		Active:    true,
+		Level:     0,
+		LevelName: "外部噪音",
+		Verdict:   "external",
+		Variants:  paths,
+		RemoteIPs: ips,
+		UAs:       uas,
+	}, true
+}
+
+// appendUnique 去重追加（保序）。
+func appendUnique(list []string, v string) []string {
+	for _, x := range list {
+		if x == v {
+			return list
+		}
+	}
+	return append(list, v)
 }
