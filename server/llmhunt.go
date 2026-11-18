@@ -71,6 +71,7 @@ func (s *Server) llmHuntScan(w http.ResponseWriter, r *http.Request) {
 		UseSearch     bool   `json:"use_search"`  // 用搜索引擎发现候选
 		Dorks         string `json:"dorks"`       // 自定义搜索词（每行一个；空=内置）
 		MaxFromSearch int    `json:"max_from_search"`
+		AllowAuth     bool   `json:"allow_auth"` // 默认口令探测（POST，仅授权目标）
 		MaxTargets    int    `json:"max_targets"`
 	}
 	if err := decode(r, &req); err != nil {
@@ -121,9 +122,12 @@ func (s *Server) llmHuntScan(w http.ResponseWriter, r *http.Request) {
 	}
 
 	id, err := s.llmScanner().Start(llmhunt.Options{
-		Targets:       targets,
-		Dorks:         dorks,
-		MaxFromSearch: req.MaxFromSearch,
+		Targets:         targets,
+		Dorks:           dorks,
+		MaxFromSearch:   req.MaxFromSearch,
+		AllowAuthChecks: req.AllowAuth,
+		// 探测目标走全局代理出口（不暴露 VPS 自己的 IP）。
+		Proxy: s.m.GlobalProxy(),
 	})
 	if err != nil {
 		writeErr(w, 409, err.Error())

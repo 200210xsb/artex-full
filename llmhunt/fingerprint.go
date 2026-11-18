@@ -67,7 +67,23 @@ func min(a, b int) int {
 	return b
 }
 
-// 需要抓取来找 key 的路径（限授权目标自身资产；只读前 64KB）。
+// 各平台"自身就会漏 key"的接口：这是现实中密钥泄漏的主渠道 —— 变量表、凭据表、
+// 工作流定义里通常明文存着模型 key，而这些接口在不少部署里没有鉴权。全部只读 GET。
+var vendorKeyPaths = map[string][]string{
+	"flowise":     {"/api/v1/variables", "/api/v1/credentials", "/api/v1/apikey", "/api/v1/chatflows", "/api/v1/tools"},
+	"langflow":    {"/api/v1/variables", "/api/v1/credentials", "/api/v1/flows/", "/api/v1/api_key/"},
+	"dify":        {"/console/api/workspaces/current/members", "/console/api/apps", "/console/api/workspaces/current"},
+	"n8n":         {"/rest/settings", "/rest/workflows", "/rest/credentials", "/rest/active-workflows"},
+	"librechat":   {"/api/config", "/api/endpoints", "/api/models"},
+	"open-webui":  {"/api/config", "/api/models", "/api/v1/auths/"},
+	"fastgpt":     {"/api/system/getInitData", "/api/core/dataset/list"},
+	"ragflow":     {"/v1/system/version", "/v1/user/info"},
+	"anythingllm": {"/api/ping", "/api/v1/admin/workspaces"},
+	// 网关：渠道列表里直接是上游 key（未鉴权版本大量存在）
+	"openai-compatible": {"/api/status", "/api/channel/", "/api/user/self", "/v1/models"},
+}
+
+// 通用路径：不管什么组件都值得看一眼的误暴露文件。
 var keyPaths = []string{
 	"/.env",
 	"/config.json",

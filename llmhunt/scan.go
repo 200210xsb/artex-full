@@ -53,7 +53,15 @@ type Options struct {
 	Dorks []string
 	// MaxFromSearch 限制搜索发现的目标数（默认 30）。
 	MaxFromSearch int
-	Note          string
+	// AllowAuthChecks 允许"默认口令探测"（每个平台最多 2 组，失败即止）。
+	// 默认关闭：这是唯一会用 POST 的动作，只适合在明确授权的目标上开。
+	AllowAuthChecks bool
+	// Proxy 是探测目标时使用的出口代理（http/socks5）。空 = 直连。
+	// 走全局代理的目的很实际：别把 VPS 自己的 IP 打进各种黑名单，也别让
+	// 目标看到"从机房 IP 来的扫描"。搜索/空间测绘的 API 调用仍走直连 ——
+	// Quake/Hunter 是国内服务，绕道香港节点反而更慢甚至失败。
+	Proxy string
+	Note  string
 }
 
 // Discoverer 执行一次搜索并返回结果 URL。由上层注入（复用 ARTEX 已有的
@@ -62,9 +70,12 @@ type Discoverer func(ctx context.Context, query string, limit int) ([]string, er
 
 // Scanner 串行化整个进程内的扫描（同时只允许一次）。
 type Scanner struct {
-	pg       *db.DB
-	client   *http.Client
-	discover Discoverer
+	pg        *db.DB
+	client    *http.Client
+	discover  Discoverer
+	allowAuth bool
+	// scanClient 是本次扫描专用的 client（按 Options.Proxy 构造，空则与 client 相同）。
+	scanClient *http.Client
 
 	mu      sync.Mutex
 	running bool
@@ -138,10 +149,36 @@ func (s *Scanner) Start(opts Options) (int64, error) {
 	}
 	s.mu.Lock()
 	s.scanID = id
+	s.allowAuth = opts.AllowAuthChecks
+	s.scanClient = s.clientFor(opts.Proxy)
 	s.mu.Unlock()
 
 	go s.run(ctx, id, opts)
 	return id, nil
+}
+
+// clientFor 按出口代理构造 client：空则直连。socks5:// 由 Transport 原生支持。
+func (s *Scanner) clientFor(proxy string) *http.Client {
+	proxy = strings.TrimSpace(proxy)
+	if proxy == "" {
+		return s.client
+	}
+	u, err := url.Parse(proxy)
+	if err != nil {
+		s.logf("代理地址无效(%s)，本次直连: %v", proxy, err)
+		return s.client
+	}
+	tr := &http.Transport{
+		Proxy:                 http.ProxyURL(u),
+		TLSHandshakeTimeout:   10 * time.Second,
+		ResponseHeaderTimeout: 15 * time.Second,
+		MaxIdleConns:          8,
+	}
+	return &http.Client{
+		Timeout:       reqTimeout,
+		Transport:     tr,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
 }
 
 // run 是扫描主循环：全局并发 globalHosts，每台主机内部串行。
@@ -307,34 +344,75 @@ func (s *Scanner) probeHost(ctx context.Context, base string, t Target) bool {
 		budget = minInt(budget, 1)
 	}
 	s.harvestKeys(ctx, base, assetID, &budget, matched.vendor)
+
+	// 默认口令探测（仅在显式开启时）：登录后读鉴权接口里的 key。
+	if s.allowAuth && budget > 0 {
+		if _, stop := s.tryDefaultAuth(ctx, base, assetID, matched.vendor, &budget); stop {
+			return true
+		}
+	}
 	return true
 }
 
 // harvestKeys 在授权目标自身的响应里识别密钥。
+//
+// GET-only 能拿到的密钥只有一类：**本来就会随响应发给浏览器的**。具体是
+//  1. 首页内联脚本与它引用的 JS bundle —— 构建期把 process.env 内联进去的 key
+//     全在这里，是现实中泄漏量最大的一处；
+//  2. .env / config.json / actuator/env / .git/config 这类误暴露的配置；
+//  3. 组件自己的未授权工作流/配置接口（Flowise、Langflow、n8n 的工作流 JSON 里
+//     常常直接写着模型 key）。
+//
+// 需要登录、需要注入、需要 RCE 才能读到的 key，GET 一律拿不到 —— 那属于漏洞利用，
+// 不在这个功能的范围内。
 func (s *Scanner) harvestKeys(ctx context.Context, base string, assetID int64, budget *int, vendor string) {
-	candidates := append([]string{"/"}, keyPaths...)
-	// 组件自带的工作流接口常常直接回工作流 JSON（里面有 key）。
-	switch vendor {
-	case "flowise":
-		candidates = append([]string{"/api/v1/chatflows"}, candidates...)
-	case "langflow":
-		candidates = append([]string{"/api/v1/flows/"}, candidates...)
-	case "n8n":
-		candidates = append([]string{"/rest/workflows"}, candidates...)
-	}
+	// 先打该组件自己的"漏 key"接口，再看通用误暴露文件。
+	candidates := append([]string{"/"}, vendorKeyPaths[vendor]...)
+	candidates = append(candidates, keyPaths...)
 
 	found := 0
+	var homeBody string
 	for _, p := range candidates {
-		if *budget <= 0 || found >= 20 || ctx.Err() != nil {
+		if *budget <= 0 || found >= 40 || ctx.Err() != nil {
 			return
 		}
 		*budget--
 		time.Sleep(perHostGap)
-		status, body, _ := s.get(ctx, base+p, keyBodyLimit)
+		status, body, _ := s.get(ctx, base+p, bodyLimit)
 		if status != 200 || body == "" {
 			continue
 		}
+		if p == "/" {
+			homeBody = body
+		}
 		found += s.extractKeys(base+p, assetID, body)
+	}
+
+	// 首页内联之后，再跟进它引用的前几个同源 JS：密钥绝大多数藏在这里。
+	if homeBody == "" || *budget <= 0 {
+		return
+	}
+	for _, js := range scriptSources(homeBody, base, 4) {
+		if *budget <= 0 || found >= 40 || ctx.Err() != nil {
+			return
+		}
+		*budget--
+		time.Sleep(perHostGap)
+		status, body, _ := s.get(ctx, js, bodyLimit)
+		if status != 200 || body == "" {
+			continue
+		}
+		found += s.extractKeys(js, assetID, body)
+		// sourcemap 里是原始源码，比压缩后的 bundle 更容易拍到明文 key。
+		if mm := sourceMapRef(body); mm != "" && *budget > 0 {
+			if mu, err := resolveRef(js, mm); err == nil {
+				*budget--
+				time.Sleep(perHostGap)
+				if st, mb, _ := s.get(ctx, mu, bodyLimit); st == 200 {
+					found += s.extractKeys(mu, assetID, mb)
+				}
+			}
+		}
 	}
 }
 
@@ -381,7 +459,7 @@ func (s *Scanner) get(ctx context.Context, rawURL string, limit int64) (int, str
 	// 中性 UA、不带 Cookie/Referer：尽量不触发风控，也不伪装成浏览器。
 	req.Header.Set("User-Agent", "ARTEX-LLM-Recon/1.0")
 	req.Header.Set("Accept", "*/*")
-	resp, err := s.client.Do(req)
+	resp, err := s.scanClientOrDefault().Do(req)
 	if err != nil {
 		return 0, "", ""
 	}
@@ -462,4 +540,15 @@ func minInt(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// scanClientOrDefault 返回本次扫描的 client（未设置时回落到默认）。
+func (s *Scanner) scanClientOrDefault() *http.Client {
+	s.mu.Lock()
+	c := s.scanClient
+	s.mu.Unlock()
+	if c != nil {
+		return c
+	}
+	return s.client
 }

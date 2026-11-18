@@ -58,6 +58,8 @@ export default function LLMHuntPage() {
   const [dorks, setDorks] = React.useState("");
   const [maxTargets, setMaxTargets] = React.useState("100");
   const [maxFromSearch, setMaxFromSearch] = React.useState("12");
+  // 默认口令探测是唯一会发 POST 的动作，默认关闭。
+  const [allowAuth, setAllowAuth] = React.useState(false);
 
   const [status, setStatus] = React.useState<ScanStatus>({ running: false, last: null });
   const [assets, setAssets] = React.useState<Asset[]>([]);
@@ -101,6 +103,7 @@ export default function LLMHuntPage() {
           use_search: useSearch,
           dorks,
           max_from_search: Number(maxFromSearch) || 12,
+          allow_auth: allowAuth,
           max_targets: Number(maxTargets) || 100,
         }),
       });
@@ -211,6 +214,10 @@ export default function LLMHuntPage() {
                 />
               </>
             ) : null}
+            <label className="flex items-center gap-2 text-sm" title="只试每个平台最常见的 2 组默认口令；登录后只读配置，不创建/不修改任何东西">
+              <Switch checked={allowAuth} onCheckedChange={setAllowAuth} size="sm" />
+              默认口令探测（POST）
+            </label>
             <Button onClick={start} disabled={busy || status.running}>
               {busy ? <Loader2Icon className="size-3.5 animate-spin" /> : <PlayIcon className="size-3.5" />}
               开始测绘
