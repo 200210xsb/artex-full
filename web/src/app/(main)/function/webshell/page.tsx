@@ -249,7 +249,14 @@ function TermRow({ line }: { line: TermLine }) {
 /** 类型徽章。 */
 function TypeBadge({ type, className }: { type: string; className?: string }) {
   return (
-    <Badge variant="outline" className={cn("h-5 px-1.5 font-mono text-[10px]", TYPE_BADGE[type] ?? "", className)}>
+    <Badge
+      variant="outline"
+      className={cn(
+        // 低饱和中性体系：类型只是元信息，不该抢颜色权重
+        "h-5 rounded-md border-border/70 bg-muted/50 px-1.5 font-mono text-[10px] text-muted-foreground",
+        className,
+      )}
+    >
       {type}
     </Badge>
   );
@@ -797,11 +804,11 @@ export default function WebshellPage() {
         </div>
       </div>
 
-      <div className="grid gap-3 sm:grid-cols-3">
+      <div className="grid gap-3 sm:grid-cols-[1.6fr_1fr_1fr]">
         <Stat label="会话数" value={sessions.length} hint={storePath || "webshells.json"} />
         <Stat
           label="当前选中"
-          value={current ? current.name : "未选择"}
+          value={<span className="text-base font-semibold">{current ? current.name : "未选择"}</span>}
           hint={current ? `${TYPE_LABEL[current.type] ?? current.type} · ${current.method}` : "左侧点一个会话"}
         />
         <Stat
@@ -893,7 +900,7 @@ export default function WebshellPage() {
                       <div
                         key={s.name}
                         className={cn(
-                          "group relative flex items-center gap-1 rounded-lg py-1.5 pr-1 pl-3 transition-colors",
+                          "group relative flex items-center gap-2 rounded-lg py-2.5 pr-1 pl-3 transition-colors",
                           active ? "bg-accent" : "hover:bg-accent/50",
                         )}
                       >
@@ -917,11 +924,11 @@ export default function WebshellPage() {
                           }}
                           className="flex min-w-0 flex-1 flex-col items-start gap-0.5 text-left"
                         >
-                          <span className="flex w-full items-center gap-1.5">
-                            <span className="min-w-0 truncate font-medium text-sm">{s.name}</span>
-                            <TypeBadge type={s.type} />
+                          <span className="flex w-full items-center gap-2">
+                            <span className="min-w-0 flex-1 truncate font-medium text-sm">{s.name}</span>
+                            <TypeBadge type={s.type} className="shrink-0" />
                           </span>
-                          <span className="w-full truncate font-mono text-[11px] text-muted-foreground" title={s.url}>
+                          <span className="w-full truncate font-mono text-[11px] text-muted-foreground/70" title={s.url}>
                             {s.url}
                           </span>
                           {s.note ? (
@@ -985,7 +992,7 @@ export default function WebshellPage() {
             </CardHeader>
 
             {/* 终端 */}
-            <div className="relative min-h-0 flex-1">
+            <div className="relative min-h-0 flex-1 p-2">
               {current ? (
                 <div className="pointer-events-none absolute top-2 right-3 z-10 flex max-w-[70%] items-center gap-1.5 rounded-full border border-zinc-700/60 bg-zinc-900/80 px-2.5 py-1 backdrop-blur">
                   <ConnBadge state={conn} compact />
@@ -998,7 +1005,7 @@ export default function WebshellPage() {
               <div
                 ref={termRef}
                 onScroll={onTermScroll}
-                className="size-full overflow-auto bg-zinc-950 p-4 pr-3 font-mono text-xs leading-relaxed"
+                className="size-full overflow-auto rounded-lg border border-zinc-800 bg-zinc-950 p-4 pr-3 font-mono text-xs leading-relaxed"
               >
                 {lines.length === 0 ? (
                   <div className="text-zinc-500">
@@ -1034,14 +1041,14 @@ export default function WebshellPage() {
 
             {/* 固定在底部的输入区 */}
             <div className="shrink-0 border-zinc-800 border-t bg-zinc-950 px-3 py-2.5">
-              <div className="mb-2 flex flex-wrap gap-1.5">
+              <div className="mb-3 flex flex-wrap gap-2">
                 {QUICK.map((q) => (
                   <button
                     key={q}
                     type="button"
                     disabled={!selected || running}
                     onClick={() => void run(q)}
-                    className="rounded-full border border-zinc-700 px-2 py-0.5 font-mono text-[11px] text-zinc-300 transition-colors hover:border-emerald-500/60 hover:text-emerald-400 disabled:cursor-not-allowed disabled:opacity-40"
+                    className="rounded-full border border-zinc-700/70 px-2.5 py-[3px] font-mono text-[10px] text-zinc-400 transition-colors hover:border-zinc-500 hover:text-zinc-200 disabled:cursor-not-allowed disabled:opacity-40"
                   >
                     {q}
                   </button>
@@ -1092,7 +1099,7 @@ export default function WebshellPage() {
             <TabsContent value="files" className="min-h-0 flex-1 overflow-auto">
               <Card className="gap-3 py-3">
                 <CardContent className="flex flex-col gap-3 px-3">
-                  <div className="flex flex-wrap items-center gap-2">
+                  <div className="flex flex-wrap items-center gap-2 rounded-lg border bg-muted/20 p-2">
                     <Button
                       variant="outline"
                       size="sm"
@@ -1188,7 +1195,7 @@ export default function WebshellPage() {
                               <TableCell className="max-w-0">
                                 <span className="flex min-w-0 items-center gap-2">
                                   {f.dir ? (
-                                    <FolderIcon className="size-4 shrink-0 text-amber-500" />
+                                    <FolderIcon className="size-4 shrink-0 text-muted-foreground/70" />
                                   ) : (
                                     <FileIcon className="size-4 shrink-0 text-muted-foreground" />
                                   )}
@@ -1281,7 +1288,7 @@ export default function WebshellPage() {
                     </div>
                   ) : null}
 
-                  <div className="flex flex-wrap items-end gap-2 border-t pt-3">
+                  <div className="flex flex-wrap items-end gap-3 rounded-lg border bg-muted/20 p-2.5">
                     <div className="flex min-w-[160px] flex-1 flex-col gap-1">
                       <Label className="text-xs">本地文件</Label>
                       <Input
