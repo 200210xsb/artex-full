@@ -1,19 +1,18 @@
-﻿"use client";
+"use client";
 
-// WebShell 页面：把 MCP 的 shell_add/list/exec/upload/download/payload_* 变成可视化操作。
-// 会话库和 MCP 共用 webshells.json，但这里直接打后端的 /api/webshell/*（不走 MCP
-// 子进程），所以点一下就有响应。
+// WebShell 会话工作台。
 //
-// 布局（桌面）：左 280px 会话栏 + 右侧上下 6:4（命令控制台 / 文件·Payload Tab）；
-// 移动端整体堆叠。终端交互：Enter 执行、↑/↓ 翻历史、Ctrl+L 清屏，手动上滑时不抢
-// 滚动位置。
+// 布局是 IDE 式三栏：左侧固定宽度的会话面板（搜索/筛选/折叠组），中间黑色终端
+// 占满主视觉，底部文件/Payload 面板可收起。页面整体不滚动，只有会话列表、终端
+// 输出、文件列表各自独立滚动。会话库与 MCP 共用 webshells.json，命令/上传/下载
+// 直接走后端 /api/webshell/*，不经 MCP 子进程。
 
 import * as React from "react";
-
 import {
-  CheckCircle2Icon,
+  CheckIcon,
   ChevronDownIcon,
   ChevronRightIcon,
+  CircleIcon,
   CopyIcon,
   DownloadIcon,
   FileIcon,
@@ -28,43 +27,23 @@ import {
   TerminalIcon,
   Trash2Icon,
   UploadIcon,
-  XCircleIcon,
+  XIcon,
 } from "lucide-react";
 import { toast } from "sonner";
 
-import {
-  AlertDialog,
-  AlertDialogAction,
-  AlertDialogCancel,
-  AlertDialogContent,
-  AlertDialogDescription,
-  AlertDialogFooter,
-  AlertDialogHeader,
-  AlertDialogTitle,
-} from "@/components/ui/alert-dialog";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Checkbox } from "@/components/ui/checkbox";
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { ScrollArea } from "@/components/ui/scroll-area";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api";
-import type { WebshellDownloadResult, WebshellPayloadDetail, WebshellPayloadEntry, WebshellSession } from "@/lib/types";
+import type {
+  WebshellDownloadResult,
+  WebshellPayloadDetail,
+  WebshellPayloadEntry,
+  WebshellSession,
+} from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 // ---------------------------------------------------------------------------
 // 文案 / 常量
 // ---------------------------------------------------------------------------
 
-/** 统一的错误文案提取：后端返回的中文错误直接展示。 */
 const errMsg = (err: unknown, fallback: string) => (err instanceof Error ? err.message : fallback);
 
 const TYPE_LABEL: Record<string, string> = {
@@ -81,48 +60,32 @@ const TYPE_HINT: Record<string, string> = {
   aspx: "命令型马：Process.Start(cmd.exe /c …) 执行参数",
 };
 
-/**
- * 类型徽章配色。按"入口形态"分两类就够：
- * W 型（eval 一句话）绿色，其他 shell（代码马 / 命令马 / 内存马）灰色。
- * 具体语言靠徽章文字区分，不靠颜色——颜色留给状态和分组，视觉才不吵。
- */
-const TYPE_BADGE: Record<string, string> = {
-  php: "border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400",
-  php_raw: "border-slate-500/30 bg-slate-500/10 text-slate-600 dark:text-slate-300",
-  jsp: "border-slate-500/30 bg-slate-500/10 text-slate-600 dark:text-slate-300",
-  aspx: "border-slate-500/30 bg-slate-500/10 text-slate-600 dark:text-slate-300",
-};
+/** W 型 = eval 一句话（php）；其余归"其他 shell"。 */
+const isWType = (t: string) => t === "php";
+
+const QUICK = ["id", "whoami", "uname -a", "pwd", "ls -la"];
 
 /** 会话执行状态：本地记录，执行成功/失败后更新。 */
 type SessionState = "pending" | "ok" | "error";
-const STATE_STYLE: Record<SessionState, { label: string; cls: string }> = {
-  pending: { label: "待验证", cls: "border-orange-500/40 bg-orange-500/10 text-orange-600 dark:text-orange-400" },
-  ok: { label: "已连通", cls: "border-emerald-500/40 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400" },
-  error: { label: "失效", cls: "border-red-500/40 bg-red-500/10 text-red-600 dark:text-red-400" },
+const STATE_DOT: Record<SessionState, string> = {
+  pending: "bg-orange-500",
+  ok: "bg-emerald-500",
+  error: "bg-red-500",
 };
-
-/** W 组 = eval 一句话（php）；其余归"其他 shell"。 */
-const isWType = (t: string) => t === "php";
-
-/** 终端快捷命令胶囊。 */
-const QUICK = ["id", "whoami", "uname -a", "pwd", "ls -la"];
 
 // ---------------------------------------------------------------------------
 // 纯函数
 // ---------------------------------------------------------------------------
 
-/** POSIX shell 单引号转义（和后端 webshellShellQuote 一致）。 */
 function shellQuote(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`;
 }
 
-/** 列出目录：PHP/JSP 走远端 shell 的 ls，aspx 走 Windows 的 dir。 */
 function listCommand(type: string, path: string): string {
   if (type === "aspx") return `dir "${path.replace(/"/g, '""')}"`;
   return `ls -la ${shellQuote(path)}`;
 }
 
-/** 远端路径拼接（保留分隔符风格）。 */
 function joinRemote(dir: string, name: string): string {
   if (dir.endsWith("/") || dir.endsWith("\\")) return `${dir}${name}`;
   if (dir === "/") return `/${name}`;
@@ -130,7 +93,6 @@ function joinRemote(dir: string, name: string): string {
   return `${dir}${win ? "\\" : "/"}${name}`;
 }
 
-/** 上一级目录；根目录返回自身。 */
 function parentPath(p: string): string {
   const clean = p.replace(/[\\/]+$/, "");
   if (!clean || clean === "/") return "/";
@@ -142,28 +104,14 @@ function parentPath(p: string): string {
   return parent;
 }
 
-/** 面包屑：/var/www → [{name:"var"},{name:"www"}]，各自带绝对路径。 */
-function crumbsOf(p: string): Array<{ name: string; path: string }> {
-  const clean = p.replace(/\\/g, "/");
-  const parts = clean.split("/").filter(Boolean);
-  const out: Array<{ name: string; path: string }> = [];
-  parts.forEach((name, i) => {
-    out.push({ name, path: `/${parts.slice(0, i + 1).join("/")}` });
-  });
-  return out;
-}
-
-/** 远端文件条目（由 ls -la 解析）。 */
 interface RemoteFile {
   name: string;
   size: number | null;
   perm: string;
   mtime: string;
   dir: boolean;
-  link?: string;
 }
 
-/** 解析 `ls -la` 输出；解析不出来（比如 Windows 的 dir）返回空数组，调用方回退成原文。 */
 function parseLs(raw: string): RemoteFile[] {
   const rows: RemoteFile[] = [];
   const re = /^([dlbcps-][rwxStTs-]{9})[+@.]?\s+\d+\s+\S+\s+\S+\s+(\d+)\s+(\w{3}\s+\d{1,2}\s+[\d:]{4,5})\s+(.+)$/;
@@ -173,145 +121,77 @@ function parseLs(raw: string): RemoteFile[] {
     let name = m[4].trim();
     if (name === "." || name === "..") continue;
     const dir = m[1].startsWith("d");
-    let link: string | undefined;
-    const arrow = name.indexOf(" -> ");
-    if (arrow >= 0) {
-      link = name.slice(arrow + 4);
-      name = name.slice(0, arrow);
-    }
-    rows.push({
-      name,
-      size: dir ? null : Number(m[2]),
-      perm: m[1],
-      mtime: m[3].replace(/\s+/g, " "),
-      dir,
-      link,
-    });
+    if (dir) name = name.replace(/\/$/, "");
+    rows.push({ name, size: dir ? null : Number(m[2]), perm: m[1], mtime: m[3], dir });
   }
-  return rows.sort((a, b) => {
-    if (a.dir !== b.dir) return a.dir ? -1 : 1;
-    return a.name.localeCompare(b.name);
-  });
+  return rows;
 }
 
-/** 人类可读的大小。 */
 function fmtSize(n: number | null): string {
-  if (n == null) return "—";
-  if (n < 1024) return `${n} B`;
-  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
-  if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
-  return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`;
+  if (n === null) return "-";
+  if (n < 1024) return `${n}B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)}K`;
+  if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)}M`;
+  return `${(n / 1024 / 1024 / 1024).toFixed(2)}G`;
 }
 
-/** Uint8Array → base64（分块，避免大文件把调用栈打爆）。 */
 function bytesToB64(bytes: Uint8Array): string {
-  const chunk = 0x8000;
   let bin = "";
-  for (let i = 0; i < bytes.length; i += chunk) {
-    bin += String.fromCharCode(...bytes.subarray(i, i + chunk));
-  }
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
   return btoa(bin);
 }
 
-/** base64 → 二进制 Blob（下载用）。 */
-function b64ToBlob(b64: string, type = "application/octet-stream"): Blob {
-  const bin = atob(b64.replace(/\s+/g, ""));
-  const bytes = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i += 1) bytes[i] = bin.charCodeAt(i);
-  return new Blob([bytes], { type });
-}
+// ---------------------------------------------------------------------------
+// 终端数据
+// ---------------------------------------------------------------------------
 
-/** 远端路径 → 文件名。 */
-function baseName(p: string): string {
-  const parts = p.split(/[\\/]/).filter(Boolean);
-  return parts[parts.length - 1] || "download.bin";
-}
+type TermLine =
+  | { id: number; kind: "cmd"; text: string }
+  | { id: number; kind: "out"; text: string; meta?: string }
+  | { id: number; kind: "err"; text: string };
 
 // ---------------------------------------------------------------------------
 // 小部件
 // ---------------------------------------------------------------------------
 
-interface TermLine {
-  id: number;
-  kind: "cmd" | "out" | "err" | "note";
-  text: string;
-  meta?: string;
+function StatPill({ label, value }: { label: string; value: React.ReactNode }) {
+  return (
+    <span className="flex items-baseline gap-1.5 text-[11px] text-muted-foreground">
+      {label}
+      <span className="font-mono font-medium text-foreground tabular-nums">{value}</span>
+    </span>
+  );
 }
 
-const TERM_CLASS: Record<TermLine["kind"], string> = {
-  cmd: "text-zinc-50",
-  out: "text-zinc-300",
-  err: "text-red-400",
-  note: "text-cyan-400",
-};
+function HelpDot({ tip }: { tip: string }) {
+  return (
+    <span
+      className="inline-flex size-4 cursor-help items-center justify-center rounded-full text-muted-foreground/60 hover:text-muted-foreground"
+      title={tip}
+      aria-label="说明"
+    >
+      <HelpCircleIcon className="size-3.5" />
+    </span>
+  );
+}
 
-/** 终端一行：命令白色带绿色 $、stdout 灰白、stderr 红、系统提示青。 */
 function TermRow({ line }: { line: TermLine }) {
   if (line.kind === "cmd") {
     return (
-      <div className="mb-1.5 break-all">
-        <span className="select-none text-emerald-400">$ </span>
-        <span className="whitespace-pre-wrap font-medium text-zinc-50">{line.text}</span>
+      <div className="flex gap-2">
+        <span className="select-none text-emerald-500">$</span>
+        <span className="text-zinc-100">{line.text}</span>
       </div>
     );
   }
+  if (line.kind === "err") {
+    return <div className="text-red-400">{line.text}</div>;
+  }
   return (
-    <div className={cn("mb-1.5 whitespace-pre-wrap break-all", TERM_CLASS[line.kind])}>
-      {line.text}
-      {line.meta ? <div className="mt-0.5 text-[10px] text-zinc-500">{line.meta}</div> : null}
+    <div className="flex flex-col">
+      <pre className="whitespace-pre-wrap text-zinc-300">{line.text}</pre>
+      {line.meta ? <span className="text-[10px] text-zinc-600">{line.meta}</span> : null}
     </div>
-  );
-}
-
-/** 类型徽章。 */
-function TypeBadge({ type, className }: { type: string; className?: string }) {
-  return (
-    <Badge
-      variant="outline"
-      className={cn(
-        // 低饱和中性体系：类型只是元信息，不该抢颜色权重
-        "h-5 rounded-md border-border/70 bg-muted/50 px-1.5 font-mono text-[10px] text-muted-foreground",
-        className,
-      )}
-    >
-      {type}
-    </Badge>
-  );
-}
-
-/** 连接状态徽标。 */
-function ConnBadge({ state, compact }: { state: "idle" | "unknown" | "ok" | "error"; compact?: boolean }) {
-  if (state === "ok") {
-    return (
-      <span className="inline-flex items-center gap-1.5 text-emerald-500 text-xs">
-        <CheckCircle2Icon className={compact ? "size-3.5" : "size-4"} />
-        已连接
-      </span>
-    );
-  }
-  if (state === "error") {
-    return (
-      <span className="inline-flex items-center gap-1.5 text-red-500 text-xs">
-        <XCircleIcon className={compact ? "size-3.5" : "size-4"} />
-        连接失败
-      </span>
-    );
-  }
-  if (state === "unknown") {
-    return <span className="text-amber-500 text-xs">待验证</span>;
-  }
-  return <span className="text-muted-foreground text-xs">未连接</span>;
-}
-
-function Stat({ label, value, hint }: { label: string; value: React.ReactNode; hint?: string }) {
-  return (
-    <Card size="sm" className="gap-1 py-3">
-      <CardContent className="flex min-w-0 flex-col gap-1">
-        <div className="text-muted-foreground text-xs">{label}</div>
-        <div className="truncate font-heading font-semibold text-lg">{value}</div>
-        {hint ? <div className="truncate text-muted-foreground text-xs">{hint}</div> : null}
-      </CardContent>
-    </Card>
   );
 }
 
@@ -321,7 +201,6 @@ function Stat({ label, value, hint }: { label: string; value: React.ReactNode; h
 
 export default function WebshellPage() {
   const [sessions, setSessions] = React.useState<WebshellSession[]>([]);
-  const [storePath, setStorePath] = React.useState("");
   const [loading, setLoading] = React.useState(false);
   const [selected, setSelected] = React.useState("");
 
@@ -331,155 +210,94 @@ export default function WebshellPage() {
   const [cmd, setCmd] = React.useState("");
   const [running, setRunning] = React.useState(false);
   const [conn, setConn] = React.useState<"idle" | "unknown" | "ok" | "error">("idle");
-  const [connMsg, setConnMsg] = React.useState("");
   const [stick, setStick] = React.useState(true);
   const [cmdHistory, setCmdHistory] = React.useState<string[]>([]);
   const [histIdx, setHistIdx] = React.useState(-1);
 
-  // 新增会话
-  const [addOpen, setAddOpen] = React.useState(false);
-  const [saving, setSaving] = React.useState(false);
-  const [form, setForm] = React.useState({
-    name: "",
-    url: "",
-    type: "php",
-    password: "pass",
-    method: "POST",
-    header: "",
-    note: "",
-    remote_path: "",
-    proxy: "",
-    user_agent: "",
-  });
-
-  // 删除确认（一条或多条）
-  const [pendingDelete, setPendingDelete] = React.useState<string[] | null>(null);
-  // 删会话时要不要连远端一起清。默认不勾：删不删痕迹由人自己决定
-  const [deleteRemote, setDeleteRemote] = React.useState(false);
-
-  // 多选：勾选后可批量改 / 批量删
+  // 左侧列表
   const [checked, setChecked] = React.useState<string[]>([]);
-  // 会话多了以后逐个找很费劲：按名称/类型/地址做本地过滤。
   const [q, setQ] = React.useState("");
   const [filter, setFilter] = React.useState<"all" | "w" | "other">("all");
   const [openW, setOpenW] = React.useState(true);
   const [openOther, setOpenOther] = React.useState(true);
-  // 底部面板：默认展开，可收起让终端占满
-  const [panelOpen, setPanelOpen] = React.useState(true);
-  // 每个会话的执行状态（后端没有这个字段，按执行结果在页面内记）
   const [stateById, setStateById] = React.useState<Record<string, SessionState>>({});
-  const [bulkOpen, setBulkOpen] = React.useState(false);
-  const [bulkBusy, setBulkBusy] = React.useState(false);
-  // 批量改只动这四个字段：留空 = 保持原值。参数名/头/URL 这些页面拿不到（打码），
-  // 后端批量接口也不会碰它们，避免把 agent 落的马改坏。
-  const [bulkForm, setBulkForm] = React.useState({ note: "", remote_path: "", proxy: "", user_agent: "" });
 
-  // 文件 Tab
+  // 底部面板
+  const [panelOpen, setPanelOpen] = React.useState(true);
+  const [panelTab, setPanelTab] = React.useState<"files" | "payloads">("files");
+
+  // 文件
   const [remotePath, setRemotePath] = React.useState("/");
   const [pathInput, setPathInput] = React.useState("/");
-  const [fileBusy, setFileBusy] = React.useState<"" | "list" | "download" | "upload">("");
   const [files, setFiles] = React.useState<RemoteFile[]>([]);
-  const [rawListing, setRawListing] = React.useState("");
+  const [fileRaw, setFileRaw] = React.useState("");
+  const [fileBusy, setFileBusy] = React.useState<"" | "list" | "download" | "upload">("");
   const [download, setDownload] = React.useState<WebshellDownloadResult | null>(null);
   const [uploadPath, setUploadPath] = React.useState("/tmp/");
   const [uploadB64, setUploadB64] = React.useState("");
   const [uploadName, setUploadName] = React.useState("");
 
-  // Payload Tab
-  const [payloads, setPayloads] = React.useState<WebshellPayloadEntry[]>([]);
-  const [payloadDir, setPayloadDir] = React.useState("");
-  const [payloadBusy, setPayloadBusy] = React.useState(false);
-  const [payloadType, setPayloadType] = React.useState("all");
-  const [payloadOpen, setPayloadOpen] = React.useState(false);
+  // Payload 库
+  const [payloadEntries, setPayloadEntries] = React.useState<WebshellPayloadEntry[]>([]);
   const [payloadDetail, setPayloadDetail] = React.useState<WebshellPayloadDetail | null>(null);
-  const [payloadLoading, setPayloadLoading] = React.useState(false);
 
-  const current = sessions.find((s) => s.name === selected) ?? null;
-  const lines = selected ? (history[selected] ?? []) : [];
+  // 新增会话
+  const [addOpen, setAddOpen] = React.useState(false);
+  const [saving, setSaving] = React.useState(false);
+  const [form, setForm] = React.useState({ name: "", url: "", type: "php", method: "GET", note: "" });
+
   const termRef = React.useRef<HTMLDivElement>(null);
   const inputRef = React.useRef<HTMLInputElement>(null);
-  const switched = React.useRef("");
 
-  // ---- 数据加载 ----
-  const loadSessions = React.useCallback(async (keepSelection = true) => {
+  const current = sessions.find((s) => s.name === selected);
+  const lines = selected ? (history[selected] ?? []) : [];
+
+  // -------------------------------------------------------------------------
+  // 数据
+  // -------------------------------------------------------------------------
+
+  const loadSessions = React.useCallback(async () => {
     setLoading(true);
     try {
       const r = await api.webshellSessions();
-      const list = r.sessions ?? [];
-      setSessions(list);
-      setStorePath(r.store ?? "");
-      setSelected((prev) => {
-        if (keepSelection && prev && list.some((s) => s.name === prev)) return prev;
-        return list[0]?.name ?? "";
-      });
-    } catch (err) {
-      toast.error(errMsg(err, "加载会话失败"));
+      setSessions(r.sessions ?? []);
+      if (!selected && r.sessions?.length) setSelected(r.sessions[0].name);
+    } catch (e) {
+      toast.error(errMsg(e, "读取会话失败"));
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [selected]);
 
   const loadPayloads = React.useCallback(async () => {
-    setPayloadBusy(true);
     try {
       const r = await api.webshellPayloads();
-      setPayloads(r.entries ?? []);
-      setPayloadDir(r.dir ?? "");
-    } catch (err) {
-      toast.error(errMsg(err, "加载 payload 库失败"));
-      setPayloads([]);
-    } finally {
-      setPayloadBusy(false);
+      setPayloadEntries(r.entries ?? []);
+    } catch {
+      // 静默：payload 库可能未初始化
     }
   }, []);
 
   React.useEffect(() => {
-    void loadSessions();
-    void loadPayloads();
+    loadSessions();
+    loadPayloads();
   }, [loadSessions, loadPayloads]);
 
-  // ---- 终端行 ----
-  const push = React.useCallback((name: string, line: Omit<TermLine, "id">) => {
-    seq.current += 1;
-    const item = { ...line, id: seq.current };
-    setHistory((h) => ({ ...h, [name]: [...(h[name] ?? []), item] }));
-  }, []);
-
-  // 切换会话：连接状态复位成「待验证」，并在终端里留一条系统提示。
   React.useEffect(() => {
-    if (!selected) {
-      setConn("idle");
-      setConnMsg("");
-      switched.current = "";
-      return;
+    if (stick && termRef.current) {
+      termRef.current.scrollTop = termRef.current.scrollHeight;
     }
-    if (switched.current === selected) return;
-    switched.current = selected;
-    setConn("unknown");
-    setConnMsg("待验证");
-    const s = sessions.find((x) => x.name === selected);
-    push(selected, {
-      kind: "note",
-      text: s
-        ? `已切换到会话「${selected}」 · ${TYPE_LABEL[s.type] ?? s.type} · ${s.url}`
-        : `已切换到会话「${selected}」`,
-    });
-  }, [selected, sessions, push]);
+  }, [lines.length, stick]);
 
-  // 跟随最新输出；用户手动上滑后不再抢滚动位置。
-  // biome-ignore lint/correctness/useExhaustiveDependencies: 输出行数/切换会话/回到底部时才需要重算。
-  React.useEffect(() => {
-    const el = termRef.current;
-    if (el && stick) el.scrollTop = el.scrollHeight;
-  }, [selected, lines.length, stick, running]);
+  // -------------------------------------------------------------------------
+  // 操作
+  // -------------------------------------------------------------------------
 
-  function onTermScroll() {
-    const el = termRef.current;
-    if (!el) return;
-    setStick(el.scrollHeight - el.scrollTop - el.clientHeight < 40);
-  }
+  const push = (name: string, item: Omit<TermLine, "id"> & { meta?: string }) => {
+    const id = ++seq.current;
+    setHistory((h) => ({ ...h, [name]: [...(h[name] ?? []), { ...item, id } as TermLine] }));
+  };
 
-  // ---- 执行命令 ----
   async function run(raw?: string) {
     const text = (raw ?? cmd).trim();
     if (!selected) {
@@ -494,21 +312,20 @@ export default function WebshellPage() {
     setCmd("");
     setStick(true);
     setRunning(true);
+    setConn("unknown");
     try {
       const r = await api.webshellExec(target, text);
       push(target, {
-        kind: r.output ? "out" : "note",
+        kind: "out",
         text: r.output || "（命令已执行，远端无输出）",
         meta: `${r.mode} · ${r.elapsed_ms}ms${r.truncated ? " · 输出已截断" : ""}`,
       });
       setConn("ok");
-      setConnMsg(`${r.mode} · ${r.elapsed_ms}ms`);
       setStateById((m) => ({ ...m, [target]: "ok" }));
     } catch (err) {
       const msg = errMsg(err, "执行失败");
       push(target, { kind: "err", text: msg });
       setConn("error");
-      setConnMsg(msg);
       setStateById((m) => ({ ...m, [target]: "error" }));
       toast.error(msg);
     } finally {
@@ -517,289 +334,165 @@ export default function WebshellPage() {
     }
   }
 
-  /** 控制台键盘：Enter 执行、↑/↓ 翻历史、Ctrl+L 清屏。 */
-  function onConsoleKeyDown(e: React.KeyboardEvent) {
+  function onConsoleKeyDown(e: React.KeyboardEvent<HTMLInputElement>) {
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "l") {
       e.preventDefault();
       clearScreen();
       return;
     }
     if (e.key === "ArrowUp") {
-      if (cmdHistory.length === 0) return;
       e.preventDefault();
-      const next = Math.min(histIdx + 1, cmdHistory.length - 1);
-      setHistIdx(next);
-      setCmd(cmdHistory[cmdHistory.length - 1 - next]);
-      return;
-    }
-    if (e.key === "ArrowDown") {
+      const next = histIdx < 0 ? cmdHistory.length - 1 : Math.max(0, histIdx - 1);
+      if (cmdHistory[next] !== undefined) {
+        setHistIdx(next);
+        setCmd(cmdHistory[next]);
+      }
+    } else if (e.key === "ArrowDown") {
+      e.preventDefault();
       if (histIdx < 0) return;
-      e.preventDefault();
-      const next = histIdx - 1;
-      setHistIdx(next);
-      setCmd(next < 0 ? "" : cmdHistory[cmdHistory.length - 1 - next]);
+      const next = histIdx + 1;
+      if (next >= cmdHistory.length) {
+        setHistIdx(-1);
+        setCmd("");
+      } else {
+        setHistIdx(next);
+        setCmd(cmdHistory[next]);
+      }
     }
   }
 
   function clearScreen() {
     if (!selected) return;
-    setHistory((h) => {
-      const next = { ...h };
-      delete next[selected];
-      return next;
-    });
-    setStick(true);
+    setHistory((h) => ({ ...h, [selected]: [] }));
   }
 
-  // ---- 会话增删 ----
-  function openAdd() {
-    setForm({ name: "", url: "", type: "php", password: "pass", method: "POST", header: "", note: "", remote_path: "", proxy: "", user_agent: "" });
-    setAddOpen(true);
+  function onTermScroll() {
+    const el = termRef.current;
+    if (!el) return;
+    setStick(el.scrollHeight - el.scrollTop - el.clientHeight < 32);
   }
 
-  async function save() {
-    if (!form.name.trim() || !form.url.trim()) {
-      toast.error("会话名与 URL 都是必填的");
-      return;
-    }
-    setSaving(true);
-    try {
-      const r = await api.webshellSaveSession({
-        name: form.name.trim(),
-        url: form.url.trim(),
-        type: form.type,
-        password: form.password.trim() || "pass",
-        method: form.method,
-        header: form.header.trim(),
-        note: form.note.trim(),
-        remote_path: form.remote_path.trim(),
-        proxy: form.proxy.trim(),
-        user_agent: form.user_agent.trim(),
-      });
-      toast.success(r.overwritten ? `已覆盖会话「${r.session.name}」` : `已添加会话「${r.session.name}」`);
-      setAddOpen(false);
-      switched.current = "";
-      await loadSessions();
-      setSelected(r.session.name);
-    } catch (err) {
-      toast.error(errMsg(err, "保存会话失败"));
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  async function doDelete() {
-    const names = pendingDelete ?? [];
-    if (names.length === 0) return;
-    setPendingDelete(null);
-    const remote = deleteRemote;
-    const failed: string[] = [];
-    let purged = 0;
-    for (const name of names) {
-      try {
-        const r = await api.webshellDeleteSession(name, { remote });
-        if (remote && r.purge?.self_gone) purged += 1;
-      } catch (err) {
-        // 远端删不掉时后端保留登记（409），这里记下来最后一起报
-        failed.push(`${name}：${errMsg(err, "删除失败")}`);
-      }
-    }
-    setHistory((h) => {
-      const next = { ...h };
-      for (const name of names) delete next[name];
-      return next;
-    });
-    setChecked((c) => c.filter((n) => !names.includes(n)));
-    await loadSessions(false);
-    if (failed.length > 0) {
-      toast.error(`已删 ${names.length - failed.length} 条，${failed.length} 条没删掉（登记保留）：${failed.join("；")}`);
-      return;
-    }
-    if (remote) {
-      toast.success(`已删除 ${names.length} 条会话，其中 ${purged} 条远端已清理干净`);
-      return;
-    }
-    toast.success(`已删除 ${names.length} 条会话（远端文件保留）`);
-  }
-
-  // 待删会话（用于在确认框里说清楚会删什么）
-  const pendingSessions = React.useMemo(
-    () => sessions.filter((x) => (pendingDelete ?? []).includes(x.name)),
-    [sessions, pendingDelete],
-  );
-
-  // ---- 批量改 ----
-  function openBulkEdit() {
-    setBulkForm({ note: "", remote_path: "", proxy: "", user_agent: "" });
-    setBulkOpen(true);
-  }
-
-  async function bulkSave() {
-    const names = checked.slice();
-    if (names.length === 0) return;
-    setBulkBusy(true);
-    try {
-      const r = await api.webshellBulkUpdateSessions(names, {
-        note: bulkForm.note.trim(),
-        remote_path: bulkForm.remote_path.trim(),
-        proxy: bulkForm.proxy.trim(),
-        user_agent: bulkForm.user_agent.trim(),
-      });
-      const updated = r.updated?.length ?? 0;
-      const missing = r.missing ?? [];
-      setBulkOpen(false);
-      await loadSessions(false);
-      if (missing.length > 0) {
-        toast.message(`已改 ${updated} 条，${missing.length} 条不在会话表里：${missing.join("、")}`);
-        return;
-      }
-      toast.success(`已改 ${updated} 条会话`);
-    } catch (err) {
-      toast.error(errMsg(err, "批量修改失败"));
-    } finally {
-      setBulkBusy(false);
-    }
-  }
-
-  // ---- 文件 ----
-  async function listRemote(path = remotePath) {
-    if (!current) {
-      toast.error("先添加一个会话");
-      return;
-    }
+  async function listRemote(path: string) {
+    if (!current) return;
+    const p = path.trim() || "/";
     setFileBusy("list");
-    setDownload(null);
     try {
-      const r = await api.webshellExec(current.name, listCommand(current.type, path || "/"));
-      const parsed = current.type === "aspx" ? [] : parseLs(r.output);
+      const r = await api.webshellExec(current.name, listCommand(current.type, p));
+      const parsed = parseLs(r.output || "");
       setFiles(parsed);
-      setRawListing(r.output || "");
-      setRemotePath(path || "/");
-      setPathInput(path || "/");
-      if (parsed.length === 0) {
-        toast.message("目录内容无法按列解析，已显示原文");
-      } else {
-        toast.success(`已列出 ${path || "/"}（${parsed.length} 项）`);
-      }
-    } catch (err) {
-      const msg = errMsg(err, "列出目录失败");
-      setFiles([]);
-      setRawListing(msg);
-      toast.error(msg);
+      setFileRaw(parsed.length === 0 ? (r.output || "") : "");
+      setRemotePath(p);
+      setPathInput(p);
+    } catch (e) {
+      toast.error(errMsg(e, "列目录失败"));
     } finally {
       setFileBusy("");
     }
   }
 
   async function downloadFile(path: string) {
-    if (!current) {
-      toast.error("先添加一个会话");
-      return;
-    }
+    if (!current) return;
     setFileBusy("download");
     setDownload(null);
     try {
       const r = await api.webshellDownload({ name: current.name, remote_path: path });
       setDownload(r);
-      toast.success(`已取回 ${r.returned} 字节${r.truncated ? `（远端 ${r.size} 字节，已截断）` : ""} · ${r.method}`);
-    } catch (err) {
-      toast.error(errMsg(err, "下载失败"));
+    } catch (e) {
+      toast.error(errMsg(e, "下载失败"));
     } finally {
       setFileBusy("");
     }
-  }
-
-  function saveDownloaded() {
-    if (!download) return;
-    const blob =
-      download.mode === "text"
-        ? new Blob([download.body], { type: "text/plain;charset=utf-8" })
-        : b64ToBlob(download.body);
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = baseName(download.remote_path);
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(url);
-    toast.success(`已保存 ${a.download}`);
   }
 
   async function pickUploadFile(file: File | null) {
     setUploadB64("");
     setUploadName("");
     if (!file) return;
-    try {
-      const buf = new Uint8Array(await file.arrayBuffer());
-      setUploadB64(bytesToB64(buf));
-      setUploadName(file.name);
-      if (!uploadPath.trim() || uploadPath.endsWith("/")) {
-        setUploadPath(`${uploadPath.trim() || "/tmp/"}${file.name}`);
-      }
-      toast.success(`已读取 ${file.name}（${buf.length} 字节）`);
-    } catch (err) {
-      toast.error(errMsg(err, "读取文件失败"));
+    const buf = new Uint8Array(await file.arrayBuffer());
+    setUploadB64(bytesToB64(buf));
+    setUploadName(file.name);
+    if (!uploadPath.endsWith(file.name)) {
+      setUploadPath(`${uploadPath.trim() || "/tmp/"}${file.name}`);
     }
   }
 
-  async function uploadRemote() {
-    if (!current) {
-      toast.error("先添加一个会话");
-      return;
-    }
-    if (!uploadB64) {
-      toast.error("先选一个本地文件");
-      return;
-    }
-    if (!uploadPath.trim()) {
-      toast.error("先填远端目标路径");
-      return;
-    }
+  async function doUpload() {
+    if (!current || !uploadB64) return;
     setFileBusy("upload");
     try {
-      const r = await api.webshellUpload({
-        name: current.name,
-        remote_path: uploadPath.trim(),
-        b64: uploadB64,
-      });
-      toast.success(`已上传 ${r.bytes} 字节到 ${r.remote_path}（${r.parts} 块 · ${r.method}）`);
-    } catch (err) {
-      toast.error(errMsg(err, "上传失败"));
+      await api.webshellUpload({ name: current.name, remote_path: uploadPath.trim(), b64: uploadB64 });
+      toast.success(`已上传到 ${uploadPath.trim()}`);
+      setUploadB64("");
+      setUploadName("");
+      void listRemote(remotePath);
+    } catch (e) {
+      toast.error(errMsg(e, "上传失败"));
     } finally {
       setFileBusy("");
     }
   }
 
-  // ---- Payload ----
-  async function openPayload(entry: WebshellPayloadEntry) {
-    setPayloadOpen(true);
-    setPayloadLoading(true);
-    setPayloadDetail(null);
+  async function openPayload(name: string) {
     try {
-      const d = await api.webshellPayload(entry.type, entry.file);
+      const [type, file] = name.split("/", 2);
+      const d = await api.webshellPayload(type, file || "");
       setPayloadDetail(d);
-    } catch (err) {
-      toast.error(errMsg(err, "读取 payload 全文失败"));
-    } finally {
-      setPayloadLoading(false);
+    } catch (e) {
+      toast.error(errMsg(e, "读取 payload 失败"));
     }
   }
 
-  async function copyText(text: string, label = "内容") {
+  async function saveSession() {
+    if (!form.name.trim() || !form.url.trim()) {
+      toast.error("名称和地址必填");
+      return;
+    }
+    setSaving(true);
+    try {
+      await api.webshellSaveSession({
+        name: form.name.trim(),
+        url: form.url.trim(),
+        type: form.type,
+        note: form.note.trim(),
+      });
+      toast.success("已登记");
+      setAddOpen(false);
+      setForm({ name: "", url: "", type: "php", method: "GET", note: "" });
+      void loadSessions();
+    } catch (e) {
+      toast.error(errMsg(e, "保存失败"));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function deleteSessions(names: string[]) {
+    if (!names.length) return;
+    if (!confirm(`删除 ${names.length} 个会话登记？`)) return;
+    try {
+      await Promise.all(names.map((n) => api.webshellDeleteSession(n)));
+      toast.success("已删除");
+      setChecked([]);
+      if (names.includes(selected)) setSelected("");
+      void loadSessions();
+    } catch (e) {
+      toast.error(errMsg(e, "删除失败"));
+    }
+  }
+
+  async function copyText(text: string, label: string) {
     try {
       await navigator.clipboard.writeText(text);
       toast.success(`已复制${label}`);
     } catch {
-      toast.error("复制失败，请手动选中后复制");
+      toast.error("复制失败");
     }
   }
 
-  const filteredPayloads = payloadType === "all" ? payloads : payloads.filter((p) => p.type === payloadType);
-  const payloadTypes = Array.from(new Set(payloads.map((p) => p.type)));
-  const crumbs = crumbsOf(remotePath);
+  // -------------------------------------------------------------------------
+  // 派生
+  // -------------------------------------------------------------------------
 
-  // 活跃 = 执行过命令且成功过的会话
   const activeCount = sessions.filter((x) => (stateById[x.name] ?? "pending") === "ok").length;
 
   const filteredSessions = React.useMemo(() => {
@@ -808,7 +501,6 @@ export default function WebshellPage() {
     if (k) list = list.filter((it) => JSON.stringify(it).toLowerCase().includes(k));
     if (filter === "w") list = list.filter((it) => isWType(it.type));
     if (filter === "other") list = list.filter((it) => !isWType(it.type));
-    // W 组在前、组内按名字排，保证分组标题只出现一次
     return [...list].sort((a, b) => {
       const aw = isWType(a.type) ? 0 : 1;
       const bw = isWType(b.type) ? 0 : 1;
@@ -816,997 +508,605 @@ export default function WebshellPage() {
     });
   }, [sessions, q, filter]);
 
-  return (
-    <div className="flex h-full min-h-0 w-full flex-1 flex-col overflow-hidden">
-      {/* 极简导航条：标题 / 统计 / 当前会话胶囊 / 操作 */}
-      <div className="flex h-11 shrink-0 items-center gap-2 border-b px-1">
-        <h1 className="font-heading text-sm font-semibold tracking-tight">WebShell</h1>
-        <span className="font-mono text-[10px] text-muted-foreground tabular-nums">
-          {sessions.length} 会话 · {activeCount} 活跃
-        </span>
-        <Button
-          variant="ghost"
-          size="icon"
-          className="size-6 text-muted-foreground"
-          aria-label="说明"
-          title={"终端交互：Enter 执行、↑/↓ 翻历史、Ctrl+L 清屏。\n会话分组：W 一句话 = eval 型一句话木马；其他 Shell = 代码马 / 命令马 / 内存马。\n状态：待验证 / 已连通 / 失效，按实际执行结果标记。"}
-        >
-          <HelpCircleIcon className="size-3.5" />
-        </Button>
+  const crumbs = remotePath.replace(/\\/g, "/").split("/").filter(Boolean);
 
-        <div className="ml-auto flex min-w-0 items-center gap-2">
+  // -------------------------------------------------------------------------
+  // 渲染
+  // -------------------------------------------------------------------------
+
+  return (
+    <div className="flex h-full min-h-0 flex-col overflow-hidden bg-background">
+      {/* ---------- 顶部导航条 ---------- */}
+      <div className="flex h-11 shrink-0 items-center gap-3 border-b px-3">
+        <h1 className="flex items-center gap-2 text-sm font-semibold">
+          <TerminalIcon className="size-4 text-muted-foreground" />
+          WebShell
+        </h1>
+        <StatPill label="会话" value={sessions.length} />
+        <StatPill label="活跃" value={activeCount} />
+        <HelpDot
+          tip={
+            "W 一句话 = eval 型一句话木马；其他 Shell = 代码马 / 命令马。\n" +
+            "状态：待验证(橙) / 已连通(绿) / 失效(红)，按执行结果标记。\n" +
+            "终端：Enter 执行、↑/↓ 翻历史、Ctrl+L 清屏。"
+          }
+        />
+        <div className="ml-auto flex items-center gap-2">
           {current ? (
-            <div className="flex min-w-0 items-center gap-1.5 rounded-md border bg-muted/30 px-2 py-1">
-              <span className={cn("size-1.5 shrink-0 rounded-full",
-                (stateById[current.name] ?? "pending") === "ok" ? "bg-emerald-500"
-                  : (stateById[current.name] ?? "pending") === "error" ? "bg-red-500" : "bg-orange-500")} />
-              <span className="max-w-40 truncate text-xs font-medium" title={current.name}>{current.name}</span>
-              <span className="font-mono text-[10px] text-muted-foreground/70">{current.type}</span>
-            </div>
+            <span className="flex items-center gap-1.5 rounded-md border bg-muted/30 px-2 py-1">
+              <span className={cn("size-1.5 rounded-full", STATE_DOT[stateById[current.name] ?? "pending"])} />
+              <span className="max-w-36 truncate text-xs font-medium" title={current.name}>{current.name}</span>
+              <span className="font-mono text-[10px] text-muted-foreground/60">{current.type}</span>
+            </span>
           ) : (
             <span className="text-xs text-muted-foreground">未选择会话</span>
           )}
-          <Button variant="outline" size="sm" className="h-7 rounded-md" onClick={() => void loadSessions()} disabled={loading}>
+          <button
+            onClick={() => void loadSessions()}
+            disabled={loading}
+            className="inline-flex h-7 items-center gap-1.5 rounded-md border px-2.5 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-50"
+          >
             {loading ? <Loader2Icon className="size-3.5 animate-spin" /> : <RefreshCwIcon className="size-3.5" />}
             刷新
-          </Button>
-          <Button size="sm" className="h-7 rounded-md" onClick={openAdd}>
+          </button>
+          <button
+            onClick={() => setAddOpen(true)}
+            className="inline-flex h-7 items-center gap-1.5 rounded-md bg-primary px-2.5 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/90"
+          >
             <PlusIcon className="size-3.5" />
             添加会话
-          </Button>
+          </button>
         </div>
       </div>
 
-      {/* 主体：左会话栏 + 右侧上下 6:4 */}
+      {/* ---------- 主体：左列表 + 右终端 ---------- */}
       <div className="flex min-h-0 flex-1 overflow-hidden">
-        {/* ---- 左：会话列表 ---- */}
+        {/* 左侧会话面板 */}
         <aside className="flex w-[260px] shrink-0 flex-col overflow-hidden border-r">
-          {/* 固定头：搜索 + 筛选 + 批量操作，不随列表滚动 */}
-          <div className="shrink-0 space-y-2 border-b px-2.5 py-2">
-            <div className="flex items-center gap-1.5">
-              <span className="text-[11px] font-medium text-muted-foreground">会话</span>
-              <span className="font-mono text-[10px] text-muted-foreground/60 tabular-nums">{sessions.length}</span>
-              <label className="ml-auto flex cursor-pointer items-center gap-1 text-[10px] text-muted-foreground">
-                <Checkbox
-                  checked={checked.length > 0 && checked.length === sessions.length}
-                  onCheckedChange={(v) => setChecked(v === true ? sessions.map((x) => x.name) : [])}
-                  aria-label="全选会话"
-                />
-                全选
-              </label>
+          {/* 固定头：搜索 + 筛选 */}
+          <div className="shrink-0 space-y-2 border-b p-2">
+            <div className="relative">
+              <SearchIcon className="pointer-events-none absolute top-1/2 left-2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+              <input
+                value={q}
+                onChange={(e) => setQ(e.target.value)}
+                placeholder="搜索会话"
+                className="h-8 w-full rounded-md border bg-transparent pl-7 pr-2 text-xs outline-none placeholder:text-muted-foreground focus:border-primary"
+              />
             </div>
-            {sessions.length > 0 ? (
-              <div className="flex items-center gap-2 pt-1">
-                <div className="relative min-w-0 flex-1">
-                  <SearchIcon className="pointer-events-none absolute top-1/2 left-2 size-3.5 -translate-y-1/2 text-muted-foreground" />
-                  <Input
-                    value={q}
-                    onChange={(e) => setQ(e.target.value)}
-                    placeholder="搜索：名称 / 类型 / 地址"
-                    className="h-8 pl-7 text-xs"
-                  />
-                </div>
-                <select
-                  value={filter}
-                  onChange={(e) => setFilter(e.target.value as "all" | "w" | "other")}
-                  className="h-8 rounded-md border bg-transparent px-2 text-xs text-muted-foreground outline-none"
-                  aria-label="按入口形态筛选"
-                >
-                  <option value="all">全部</option>
-                  <option value="w">W 一句话</option>
-                  <option value="other">其他 Shell</option>
-                </select>
-              </div>
-            ) : null}
+            <select
+              value={filter}
+              onChange={(e) => setFilter(e.target.value as "all" | "w" | "other")}
+              className="h-8 w-full rounded-md border bg-transparent px-2 text-xs text-muted-foreground outline-none"
+              aria-label="按入口形态筛选"
+            >
+              <option value="all">全部（{sessions.length}）</option>
+              <option value="w">W 一句话（{sessions.filter((s) => isWType(s.type)).length}）</option>
+              <option value="other">其他 Shell（{sessions.filter((s) => !isWType(s.type)).length}）</option>
+            </select>
             {checked.length > 0 ? (
-              <div className="flex flex-wrap items-center gap-1.5">
+              <div className="flex items-center gap-1.5 rounded-md bg-muted/50 px-2 py-1">
                 <span className="text-[10px] text-muted-foreground">已选 {checked.length}</span>
-                <Button size="sm" variant="outline" className="h-6 rounded-md px-2 text-[10px]" onClick={openBulkEdit}>批量修改</Button>
-                <Button size="sm" variant="outline" className="h-6 rounded-md px-2 text-[10px]" onClick={() => setPendingDelete(checked)}>删除</Button>
-                <Button size="sm" variant="ghost" className="h-6 rounded-md px-2 text-[10px]" onClick={() => setChecked([])}>清空</Button>
+                <button
+                  onClick={() => deleteSessions(checked)}
+                  className="ml-auto inline-flex h-6 items-center gap-1 rounded-md border px-1.5 text-[10px] text-red-600 transition-colors hover:bg-red-500/10"
+                >
+                  <Trash2Icon className="size-3" />
+                  删除
+                </button>
+                <button
+                  onClick={() => setChecked([])}
+                  className="inline-flex h-6 items-center rounded-md px-1.5 text-[10px] text-muted-foreground hover:text-foreground"
+                >
+                  清空
+                </button>
               </div>
             ) : null}
           </div>
-          <div className="min-h-0 flex-1 overflow-hidden">
-            {sessions.length === 0 ? (
-              <div className="px-2">
-                <Empty className="border border-dashed p-4">
-                  <EmptyHeader>
-                    <EmptyMedia variant="icon">
-                      <TerminalIcon />
-                    </EmptyMedia>
-                    <EmptyTitle>先添加一个会话</EmptyTitle>
-                    <EmptyDescription className="text-xs">马子从 Payload 库取，落地后在这里登记。</EmptyDescription>
-                  </EmptyHeader>
-                  <EmptyContent>
-                    <Button size="sm" onClick={openAdd}>
-                      <PlusIcon className="size-4" />
-                      添加第一个会话
-                    </Button>
-                  </EmptyContent>
-                </Empty>
+
+          {/* 列表（独立滚动） */}
+          <div className="scrollbar-thin min-h-0 flex-1 overflow-y-auto overscroll-contain">
+            {filteredSessions.length === 0 ? (
+              <div className="px-3 py-10 text-center">
+                <p className="text-xs text-muted-foreground">
+                  {sessions.length === 0 ? "还没有会话" : `没有匹配「${q}」的会话`}
+                </p>
+                {sessions.length === 0 ? (
+                  <button
+                    onClick={() => setAddOpen(true)}
+                    className="mt-3 inline-flex h-7 items-center gap-1 rounded-md bg-primary px-2.5 text-xs font-medium text-primary-foreground"
+                  >
+                    <PlusIcon className="size-3.5" />
+                    添加第一个会话
+                  </button>
+                ) : null}
               </div>
-            ) : filteredSessions.length === 0 ? (
-                <p className="px-2 py-6 text-center text-xs text-muted-foreground">没有匹配「{q}」的会话</p>
-              ) : (
-              <ScrollArea className="h-full [&>[data-radix-scroll-area-viewport]]:overscroll-contain [&>[data-radix-scroll-area-viewport]]:[scrollbar-width:thin]">
-                <div className="flex flex-col gap-0.5 pr-2">
-                  {(["w", "other"] as const).map((gk) => {
-                    const items = filteredSessions.filter((x) => isWType(x.type) === (gk === "w"));
-                    if (filter !== "all" && filter !== gk) return null;
-                    const open = gk === "w" ? openW : openOther;
-                    const toggle = () => (gk === "w" ? setOpenW((v) => !v) : setOpenOther((v) => !v));
-                    return (
-                      <div key={gk}>
-                        <button
-                          type="button"
-                          onClick={toggle}
-                          className="flex w-full items-center gap-2 px-3 py-1.5 text-[11px] font-medium text-muted-foreground hover:text-foreground"
-                        >
-                          <span className={cn("size-1.5 rounded-full", gk === "w" ? "bg-emerald-500" : "bg-slate-400")} />
-                          {gk === "w" ? "W 一句话" : "其他 Shell"}
-                          <span className="tabular-nums text-muted-foreground/60">{items.length}</span>
-                          <ChevronRightIcon
-                            className={cn("ml-auto size-3 transition-transform", open && "rotate-90")}
-                          />
-                        </button>
-                        {open ? items.map((s) => {
-                    const active = s.name === selected;
-                    return (
-                      <div
-                        key={s.name}
-                        className={cn(
-                          "group relative flex items-center gap-2 rounded-lg py-2.5 pr-1 pl-3 transition-colors",
-                          active ? "bg-accent" : "hover:bg-accent/50",
-                        )}
-                      >
-                        {active ? (
-                          <span className="absolute inset-y-1.5 left-0 w-[3px] rounded-full bg-primary" />
-                        ) : null}
-                        <Checkbox
-                          checked={checked.includes(s.name)}
-                          onCheckedChange={(v) =>
-                            setChecked((c) => (v === true ? [...c, s.name] : c.filter((x) => x !== s.name)))
-                          }
-                          onClick={(e) => e.stopPropagation()}
-                          aria-label={`选择会话 ${s.name}`}
-                          className="ml-1 shrink-0"
-                        />
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setSelected(s.name);
-                            inputRef.current?.focus();
-                          }}
-                          className="flex min-w-0 flex-1 flex-col items-start gap-0.5 text-left"
-                        >
-                          <span className="flex w-full items-center gap-2">
-                            <span className="min-w-0 flex-1 truncate font-medium text-sm">{s.name}</span>
-                            <TypeBadge type={s.type} className="shrink-0" />
-                            <span
+            ) : (
+              (["w", "other"] as const).map((gk) => {
+                const items = filteredSessions.filter((x) => isWType(x.type) === (gk === "w"));
+                if (filter !== "all" && filter !== gk) return null;
+                if (items.length === 0) return null;
+                const open = gk === "w" ? openW : openOther;
+                const toggle = () => (gk === "w" ? setOpenW((v) => !v) : setOpenOther((v) => !v));
+                return (
+                  <div key={gk}>
+                    <button
+                      type="button"
+                      onClick={toggle}
+                      className="sticky top-0 z-10 flex w-full items-center gap-2 border-b bg-background/95 px-3 py-1.5 text-[11px] font-medium text-muted-foreground backdrop-blur hover:text-foreground"
+                    >
+                      <span className={cn("size-1.5 rounded-full", gk === "w" ? "bg-emerald-500" : "bg-slate-400")} />
+                      {gk === "w" ? "W 一句话" : "其他 Shell"}
+                      <span className="tabular-nums text-muted-foreground/60">{items.length}</span>
+                      <ChevronRightIcon className={cn("ml-auto size-3 transition-transform", open && "rotate-90")} />
+                    </button>
+                    {open
+                      ? items.map((s) => {
+                          const active = s.name === selected;
+                          const st = stateById[s.name] ?? "pending";
+                          return (
+                            <div
+                              key={s.name}
                               className={cn(
-                                "shrink-0 rounded border px-1.5 py-0.5 text-[10px] leading-none",
-                                STATE_STYLE[stateById[s.name] ?? "pending"].cls,
+                                "group relative flex items-center gap-2 px-2 py-2 transition-colors",
+                                active ? "bg-primary/10" : "hover:bg-muted/60",
                               )}
                             >
-                              {STATE_STYLE[stateById[s.name] ?? "pending"].label}
-                            </span>
-                          </span>
-                          <span className="w-full truncate font-mono text-[11px] text-muted-foreground/70" title={s.url}>
-                            {s.url}
-                          </span>
-                          {s.note ? (
-                            <span className="w-full truncate text-[11px] text-muted-foreground">{s.note}</span>
-                          ) : null}
-                          {s.egress ? (
-                            <span
-                              className={cn(
-                                "w-full truncate text-[11px]",
-                                s.egress === "直连" ? "text-amber-600" : "text-emerald-600",
-                              )}
-                              title={s.egress === "直连" ? "目标侧会看到平台 IP" : "目标侧只看到代理 IP"}
-                            >
-                              出口：{s.egress}
-                            </span>
-                          ) : null}
-                        </button>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="size-7 shrink-0 text-muted-foreground opacity-60 transition-opacity hover:opacity-100 focus-visible:opacity-100"
-                          title="删除会话登记（默认只删登记，可在确认框里勾选连远端一起删）"
-                          onClick={() => setPendingDelete([s.name])}
-                        >
-                          <Trash2Icon className="size-3.5" />
-                        </Button>
-                      </div>
-                    );
-                        }) : null}
-                      </div>
-                    );
-                  })}
-                </div>
-              </ScrollArea>
+                              {active ? <span className="absolute inset-y-0 left-0 w-0.5 bg-primary" /> : null}
+                              <input
+                                type="checkbox"
+                                checked={checked.includes(s.name)}
+                                onChange={(e) =>
+                                  setChecked((c) => (e.target.checked ? [...c, s.name] : c.filter((x) => x !== s.name)))
+                                }
+                                onClick={(e) => e.stopPropagation()}
+                                aria-label={`选择会话 ${s.name}`}
+                                className="ml-1 shrink-0 accent-primary"
+                              />
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setSelected(s.name);
+                                  inputRef.current?.focus();
+                                }}
+                                title={`${s.name}\n${s.url}${s.note ? `\n${s.note}` : ""}`}
+                                className="flex min-w-0 flex-1 flex-col items-start gap-0.5 text-left"
+                              >
+                                <span className="flex w-full items-center gap-1.5">
+                                  <span className={cn("size-1.5 shrink-0 rounded-full", STATE_DOT[st])} />
+                                  <span className="min-w-0 flex-1 truncate text-xs font-medium">{s.name}</span>
+                                  <span className="shrink-0 font-mono text-[9px] text-muted-foreground/60">
+                                    {s.type}
+                                  </span>
+                                </span>
+                                <span className="w-full truncate font-mono text-[10px] text-muted-foreground/70">
+                                  {s.url}
+                                </span>
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => deleteSessions([s.name])}
+                                title="删除会话登记"
+                                className="shrink-0 rounded p-1 text-muted-foreground opacity-0 transition-opacity hover:text-red-500 group-hover:opacity-100"
+                              >
+                                <Trash2Icon className="size-3" />
+                              </button>
+                            </div>
+                          );
+                        })
+                      : null}
+                  </div>
+                );
+              })
             )}
           </div>
         </aside>
 
-        {/* ---- 右：控制台 + Tab 区 ---- */}
-        <div className="flex min-w-0 flex-1 flex-col gap-0 overflow-hidden">
-          {/* 命令控制台 */}
-          <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-            <div className="flex h-8 shrink-0 items-center gap-2 border-b px-2.5">
-              <TerminalIcon className="size-3.5 text-muted-foreground" />
-              <span className="text-xs font-medium">终端</span>
-              {current ? (
-                <>
-                  <span className="max-w-56 truncate text-xs text-muted-foreground" title={current.name}>· {current.name}</span>
-                  <span className="font-mono text-[10px] text-muted-foreground/60">{TYPE_LABEL[current.type] ?? current.type}</span>
-                </>
-              ) : null}
-              <Button
-                variant="ghost"
-                size="sm"
-                className="ml-auto h-6 rounded-md px-2 text-[10px] text-muted-foreground"
-                disabled={!selected || lines.length === 0}
-                onClick={clearScreen}
-                title="清屏（Ctrl+L）"
-              >
-                清屏
-              </Button>
-            </div>
-
-            <div className="relative min-h-0 flex-1">
-              {current ? (
-                <div className="pointer-events-none absolute top-2 right-3 z-10 flex max-w-[70%] items-center gap-1.5 rounded-full border border-zinc-700/60 bg-zinc-900/80 px-2.5 py-1 backdrop-blur">
-                  <ConnBadge state={conn} compact />
-                  <span className="text-zinc-600">·</span>
-                  <span className="font-mono text-[10px] text-zinc-300">{current.type}</span>
-                  <span className="text-zinc-600">·</span>
-                  <span className="max-w-[180px] truncate font-mono text-[10px] text-zinc-400">{current.url}</span>
-                </div>
-              ) : null}
-              <div
-                ref={termRef}
-                onScroll={onTermScroll}
-                className="scrollbar-thin size-full overflow-auto overscroll-contain bg-zinc-950 p-4 pr-3 font-mono text-[12px] leading-relaxed"
-              >
-                {lines.length === 0 ? (
-                  <div className="text-zinc-500">
-                    {current
-                      ? "输入 id 或点下面的快捷命令开始；↑/↓ 翻历史，Ctrl+L 清屏。"
-                      : "先添加一个会话，然后在这里执行命令。"}
-                  </div>
-                ) : (
-                  lines.map((l) => <TermRow key={l.id} line={l} />)
-                )}
-                {running ? (
-                  <div className="flex items-center gap-2 text-cyan-400">
-                    <Loader2Icon className="size-3 animate-spin" />
-                    执行中…
-                  </div>
-                ) : null}
-              </div>
-              {!stick && lines.length > 0 ? (
-                <Button
-                  size="sm"
-                  variant="secondary"
-                  className="absolute right-3 bottom-3 h-7 rounded-full px-2.5 text-xs shadow"
-                  onClick={() => {
-                    const el = termRef.current;
-                    if (el) el.scrollTop = el.scrollHeight;
-                    setStick(true);
-                  }}
-                >
-                  ↓ 最新输出
-                </Button>
-              ) : null}
-            </div>
-
-            {/* 终端内嵌输入栏：快捷命令 + 输入框 + 执行，紧贴输出区 */}
-            <div className="shrink-0 border-zinc-800 border-t bg-zinc-950 px-3 py-2">
-              <div className="mb-2 flex flex-wrap gap-1.5">
-                {QUICK.map((q) => (
-                  <button
-                    key={q}
-                    type="button"
-                    disabled={!selected || running}
-                    onClick={() => void run(q)}
-                    className="rounded-md border border-zinc-700/70 px-2 py-[2px] font-mono text-[10px] text-zinc-400 transition-colors hover:border-zinc-500 hover:bg-zinc-800/60 hover:text-zinc-200 disabled:cursor-not-allowed disabled:opacity-40"
-                  >
-                    {q}
-                  </button>
-                ))}
-              </div>
-              <form
-                className="flex items-center gap-2"
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  void run();
-                }}
-              >
-                <span className="select-none font-mono text-emerald-400">$</span>
-                <Input
-                  ref={inputRef}
-                  value={cmd}
-                  onChange={(e) => setCmd(e.target.value)}
-                  onKeyDown={onConsoleKeyDown}
-                  placeholder={selected ? "输入命令后回车，例如 id" : "先添加一个会话"}
-                  disabled={!selected || running}
-                  autoComplete="off"
-                  spellCheck={false}
-                  className="h-8 border-zinc-700 bg-zinc-900 font-mono text-xs text-zinc-100 placeholder:text-zinc-600 focus-visible:border-emerald-500/60 focus-visible:ring-emerald-500/20"
-                />
-                <Button type="submit" size="sm" className="h-8" disabled={!selected || running || !cmd.trim()}>
-                  {running ? <Loader2Icon className="size-3.5 animate-spin" /> : <SendIcon className="size-3.5" />}
-                  执行
-                </Button>
-              </form>
-            </div>
+        {/* 右侧：终端 + 底部面板 */}
+        <div className="flex min-w-0 flex-1 flex-col overflow-hidden">
+          {/* 终端标题行 */}
+          <div className="flex h-8 shrink-0 items-center gap-2 border-b px-2.5">
+            <TerminalIcon className="size-3.5 text-muted-foreground" />
+            <span className="text-xs font-medium">终端</span>
+            {current ? (
+              <>
+                <span className="max-w-56 truncate text-xs text-muted-foreground" title={current.name}>
+                  · {current.name}
+                </span>
+                <span className="font-mono text-[10px] text-muted-foreground/60">
+                  {TYPE_LABEL[current.type] ?? current.type}
+                </span>
+              </>
+            ) : null}
+            <button
+              onClick={clearScreen}
+              disabled={!selected || lines.length === 0}
+              title="清屏（Ctrl+L）"
+              className="ml-auto inline-flex h-6 items-center rounded-md px-2 text-[10px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-40"
+            >
+              清屏
+            </button>
           </div>
 
-          {/* 底部面板：文件 / Payload 库，可收起 */}
-          <Tabs defaultValue="files" className="flex min-h-0 min-w-0 flex-col gap-2">
-            <div className="flex shrink-0 items-center justify-between gap-2 border-b px-1">
-              <TabsList className="rounded-none bg-transparent p-0">
-                <TabsTrigger value="files" className="rounded-none border-b-2 border-transparent px-2.5 pb-1.5 text-xs text-muted-foreground data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:text-foreground data-[state=active]:shadow-none">文件管理</TabsTrigger>
-                <TabsTrigger value="payloads" className="rounded-none border-b-2 border-transparent px-2.5 pb-1.5 text-xs text-muted-foreground data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:text-foreground data-[state=active]:shadow-none">Payload 库</TabsTrigger>
-              </TabsList>
-              <Button
-                variant="ghost"
-                size="icon"
-                className="mr-1 size-6 text-muted-foreground"
-                onClick={() => setPanelOpen((v) => !v)}
-                title={panelOpen ? "收起底部面板" : "展开底部面板"}
-                aria-label="收起或展开底部面板"
-              >
-                <ChevronDownIcon className={cn("size-3.5 transition-transform", !panelOpen && "rotate-180")} />
-              </Button>
-              {current ? (
-                <span className="truncate font-mono text-xs text-muted-foreground">
-                  {current.name} · {TYPE_LABEL[current.type] ?? current.type}
-                </span>
-              ) : null}
-            </div>
-
-            {/* ---- 文件 ---- */}
-            {panelOpen ? (<>
-            <TabsContent value="files" className="min-h-0 flex-1 overflow-auto">
-              <Card className="gap-3 py-3">
-                <CardContent className="flex flex-col gap-3 px-3">
-                  <div className="flex flex-wrap items-center gap-2 rounded-lg border bg-muted/20 p-2">
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      title="返回上级"
-                      disabled={!current || remotePath === "/"}
-                      onClick={() => void listRemote(parentPath(remotePath))}
-                    >
-                      <FolderUpIcon className="size-4" />
-                      上级
-                    </Button>
-                    <Input
-                      value={pathInput}
-                      onChange={(e) => setPathInput(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter") {
-                          e.preventDefault();
-                          void listRemote(pathInput.trim() || "/");
-                        }
-                      }}
-                      placeholder="/var/www/html 或 C:\inetpub\wwwroot"
-                      className="h-8 min-w-[180px] flex-1 font-mono text-xs"
-                      disabled={!current}
-                    />
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={() => void listRemote(pathInput.trim() || "/")}
-                      disabled={!current || fileBusy === "list"}
-                    >
-                      {fileBusy === "list" ? (
-                        <Loader2Icon className="size-4 animate-spin" />
-                      ) : (
-                        <RefreshCwIcon className="size-4" />
-                      )}
-                      列出
-                    </Button>
-                    <Button
-                      size="sm"
-                      onClick={() => void downloadFile(pathInput.trim() || remotePath)}
-                      disabled={!current || fileBusy === "download"}
-                    >
-                      {fileBusy === "download" ? (
-                        <Loader2Icon className="size-4 animate-spin" />
-                      ) : (
-                        <DownloadIcon className="size-4" />
-                      )}
-                      下载路径
-                    </Button>
-                  </div>
-
-                  {crumbs.length > 0 ? (
-                    <div className="flex min-w-0 flex-wrap items-center gap-0.5 text-xs">
-                      <button
-                        type="button"
-                        onClick={() => void listRemote("/")}
-                        className="shrink-0 rounded px-1 py-0.5 font-mono text-muted-foreground hover:bg-accent hover:text-foreground"
-                      >
-                        /
-                      </button>
-                      {crumbs.map((c, i) => (
-                        <React.Fragment key={c.path}>
-                          <ChevronRightIcon className="size-3 shrink-0 text-muted-foreground" />
-                          <button
-                            type="button"
-                            onClick={() => void listRemote(c.path)}
-                            className={cn(
-                              "max-w-[160px] shrink-0 truncate rounded px-1 py-0.5 font-mono text-muted-foreground hover:bg-accent hover:text-foreground",
-                              i === crumbs.length - 1 && "font-medium text-foreground",
-                            )}
-                          >
-                            {c.name}
-                          </button>
-                        </React.Fragment>
-                      ))}
-                    </div>
-                  ) : null}
-
-                  {files.length > 0 ? (
-                    <div className="overflow-hidden rounded-md border">
-                      <Table>
-                        <TableHeader>
-                          <TableRow className="hover:bg-transparent">
-                            <TableHead>名称</TableHead>
-                            <TableHead className="w-24 text-right">大小</TableHead>
-                            <TableHead className="w-28 font-mono">权限</TableHead>
-                            <TableHead className="w-36">修改时间</TableHead>
-                            <TableHead className="w-20 text-right">操作</TableHead>
-                          </TableRow>
-                        </TableHeader>
-                        <TableBody>
-                          {files.map((f) => (
-                            <TableRow key={f.name}>
-                              <TableCell className="max-w-0">
-                                <span className="flex min-w-0 items-center gap-2">
-                                  {f.dir ? (
-                                    <FolderIcon className="size-4 shrink-0 text-muted-foreground/70" />
-                                  ) : (
-                                    <FileIcon className="size-4 shrink-0 text-muted-foreground" />
-                                  )}
-                                  {f.dir ? (
-                                    <button
-                                      type="button"
-                                      className="truncate font-mono text-xs hover:underline"
-                                      title={f.name}
-                                      onClick={() => void listRemote(joinRemote(remotePath, f.name))}
-                                    >
-                                      {f.name}
-                                    </button>
-                                  ) : (
-                                    <span className="truncate font-mono text-xs" title={f.link ?? f.name}>
-                                      {f.name}
-                                      {f.link ? <span className="text-muted-foreground"> → {f.link}</span> : null}
-                                    </span>
-                                  )}
-                                </span>
-                              </TableCell>
-                              <TableCell className="text-right font-mono text-xs text-muted-foreground">
-                                {fmtSize(f.size)}
-                              </TableCell>
-                              <TableCell className="font-mono text-xs text-muted-foreground">{f.perm}</TableCell>
-                              <TableCell className="text-xs text-muted-foreground">{f.mtime}</TableCell>
-                              <TableCell className="text-right">
-                                {f.dir ? (
-                                  <span className="text-xs text-muted-foreground">—</span>
-                                ) : (
-                                  <Button
-                                    variant="ghost"
-                                    size="icon"
-                                    className="size-7"
-                                    title="下载到本地"
-                                    disabled={fileBusy === "download"}
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      void downloadFile(joinRemote(remotePath, f.name));
-                                    }}
-                                  >
-                                    <DownloadIcon className="size-3.5" />
-                                  </Button>
-                                )}
-                              </TableCell>
-                            </TableRow>
-                          ))}
-                        </TableBody>
-                      </Table>
-                    </div>
-                  ) : null}
-                  {files.length === 0 && rawListing ? (
-                    <pre className="max-h-56 overflow-auto whitespace-pre-wrap rounded-md border bg-muted/40 p-2.5 font-mono text-[11px]">
-                      {rawListing}
-                    </pre>
-                  ) : null}
-                  {files.length === 0 && !rawListing ? (
-                    <div className="rounded-md border border-dashed p-4 text-center text-xs text-muted-foreground">
-                      填一个远端路径（如 /var/www/html），点「列出」看目录内容。
-                    </div>
-                  ) : null}
-
-                  {download ? (
-                    <div className="flex flex-col gap-2 rounded-md border p-2.5">
-                      <div className="flex flex-wrap items-center justify-between gap-2">
-                        <div className="flex min-w-0 items-center gap-2 text-xs">
-                          <FileIcon className="size-3.5 shrink-0 text-muted-foreground" />
-                          <span className="truncate font-mono">{download.remote_path}</span>
-                          <Badge variant="outline" className="shrink-0 text-[10px]">
-                            {download.mode === "text" ? "文本" : "base64"}
-                          </Badge>
-                          <span className="shrink-0 text-muted-foreground">
-                            {fmtSize(download.returned)}
-                            {download.truncated ? ` / 远端 ${fmtSize(download.size)}` : ""}
-                          </span>
-                        </div>
-                        <div className="flex items-center gap-1">
-                          <Button variant="outline" size="sm" onClick={saveDownloaded}>
-                            <DownloadIcon className="size-3.5" />
-                            保存
-                          </Button>
-                          <Button variant="ghost" size="sm" onClick={() => void copyText(download.body, "文件内容")}>
-                            <CopyIcon className="size-3.5" />
-                            复制
-                          </Button>
-                        </div>
-                      </div>
-                      <pre className="max-h-40 overflow-auto whitespace-pre-wrap rounded bg-muted/40 p-2 font-mono text-[11px]">
-                        {download.mode === "text" ? download.body : `${download.body.slice(0, 2000)}…`}
-                      </pre>
-                    </div>
-                  ) : null}
-
-                  <div className="flex flex-wrap items-end gap-3 rounded-lg border bg-muted/20 p-2.5">
-                    <div className="flex min-w-[160px] flex-1 flex-col gap-1">
-                      <Label className="text-xs">本地文件</Label>
-                      <Input
-                        type="file"
-                        className="h-8"
-                        onChange={(e) => void pickUploadFile(e.target.files?.[0] ?? null)}
-                        disabled={!current}
-                      />
-                    </div>
-                    <div className="flex min-w-[200px] flex-1 flex-col gap-1">
-                      <Label className="text-xs">上传到（远端完整路径）</Label>
-                      <Input
-                        value={uploadPath}
-                        onChange={(e) => setUploadPath(e.target.value)}
-                        placeholder="/tmp/tool"
-                        className="h-8 font-mono text-xs"
-                      />
-                    </div>
-                    <Button
-                      size="sm"
-                      onClick={() => void uploadRemote()}
-                      disabled={!current || !uploadB64 || fileBusy === "upload"}
-                    >
-                      {fileBusy === "upload" ? (
-                        <Loader2Icon className="size-4 animate-spin" />
-                      ) : (
-                        <UploadIcon className="size-4" />
-                      )}
-                      上传
-                    </Button>
-                    {uploadName ? (
-                      <span className="text-xs text-muted-foreground">
-                        {uploadName} · {fmtSize(Math.ceil((uploadB64.length * 3) / 4))}
-                      </span>
-                    ) : null}
-                  </div>
-                </CardContent>
-              </Card>
-            </TabsContent>
-
-            {/* ---- Payload 库 ---- */}
-            <TabsContent value="payloads" className="min-h-0 flex-1 overflow-auto">
-              <Card className="gap-3 py-3">
-                <CardContent className="flex flex-col gap-3 px-3">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div className="min-w-0 text-xs text-muted-foreground">
-                      点开看全文、复制；落地后回到左栏登记会话。
-                      {payloadDir ? <span className="ml-1 font-mono">· {payloadDir}</span> : null}
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <Select value={payloadType} onValueChange={setPayloadType}>
-                        <SelectTrigger size="sm" className="w-28">
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value="all">全部类型</SelectItem>
-                          {payloadTypes.map((t) => (
-                            <SelectItem key={t} value={t}>
-                              {t}
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                      <Button variant="outline" size="sm" onClick={() => void loadPayloads()} disabled={payloadBusy}>
-                        {payloadBusy ? (
-                          <Loader2Icon className="size-4 animate-spin" />
-                        ) : (
-                          <RefreshCwIcon className="size-4" />
-                        )}
-                        刷新
-                      </Button>
-                    </div>
-                  </div>
-
-                  {payloads.length === 0 ? (
-                    <div className="rounded-md border border-dashed p-4 text-center text-xs text-muted-foreground">
-                      payload 库为空（远端应有 php / jsp / aspx 三个子目录）
-                    </div>
-                  ) : (
-                    <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
-                      {filteredPayloads.map((p) => (
-                        <button
-                          key={p.name}
-                          type="button"
-                          onClick={() => void openPayload(p)}
-                          className="group flex min-w-0 flex-col gap-1.5 overflow-hidden rounded-lg border p-2.5 text-left transition-colors hover:border-primary/40 hover:bg-accent/40"
-                        >
-                          <span className="flex w-full items-center justify-between gap-2">
-                            <span className="flex min-w-0 items-center gap-1.5">
-                              <TypeBadge type={p.type} />
-                              <span className="min-w-0 truncate font-mono text-xs">{p.file}</span>
-                            </span>
-                            <span className="shrink-0 text-[10px] text-muted-foreground">{fmtSize(p.size)}</span>
-                          </span>
-                          <span className="w-full min-w-0 truncate text-xs text-muted-foreground">
-                            {p.meta.summary || "（无说明）"}
-                          </span>
-                          {p.meta.mcp ? (
-                            <span className="w-full min-w-0 truncate font-mono text-[10px] text-muted-foreground/80">
-                              {p.meta.mcp}
-                            </span>
-                          ) : null}
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                </CardContent>
-              </Card>
-            </TabsContent>
-            </>) : null}
-          </Tabs>
-        </div>
-      </div>
-
-      {/* ---- 新增会话 ---- */}
-      <Dialog open={addOpen} onOpenChange={setAddOpen}>
-        <DialogContent className="max-h-[90vh] overflow-auto sm:max-w-lg">
-          <DialogHeader>
-            <DialogTitle>添加 WebShell 会话</DialogTitle>
-            <DialogDescription>
-              同名会覆盖已有配置（created_at 保留）。会话库权限 600，参数名与 header 的值不会下发到页面。
-            </DialogDescription>
-          </DialogHeader>
-          <form
-            className="flex flex-col gap-3"
-            onSubmit={(e) => {
-              e.preventDefault();
-              void save();
-            }}
+          {/* 终端输出（独立滚动） */}
+          <div
+            ref={termRef}
+            onScroll={onTermScroll}
+            className="scrollbar-thin min-h-0 flex-1 overflow-y-auto overscroll-contain bg-zinc-950 p-4 font-mono text-[12px] leading-relaxed"
           >
-            <div className="flex flex-col gap-1.5">
-              <Label>会话名</Label>
-              <Input
-                value={form.name}
-                onChange={(e) => setForm({ ...form, name: e.target.value })}
-                placeholder="target-php-1（允许中文，不能含路径分隔符）"
-              />
-            </div>
-            <div className="flex flex-col gap-1.5">
-              <Label>WebShell URL</Label>
-              <Input
-                value={form.url}
-                onChange={(e) => setForm({ ...form, url: e.target.value })}
-                placeholder="http://target/upload/shell.php"
-                className="font-mono"
-              />
-            </div>
-            <div className="grid gap-3 sm:grid-cols-2">
-              <div className="flex flex-col gap-1.5">
-                <Label>类型</Label>
-                <Select value={form.type} onValueChange={(v) => setForm({ ...form, type: v })}>
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="php">php（eval 一句话）</SelectItem>
-                    <SelectItem value="php_raw">php_raw（代码执行）</SelectItem>
-                    <SelectItem value="jsp">jsp（命令型）</SelectItem>
-                    <SelectItem value="aspx">aspx（命令型）</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-              <div className="flex flex-col gap-1.5">
-                <Label>请求方法</Label>
-                <Select value={form.method} onValueChange={(v) => setForm({ ...form, method: v })}>
-                  <SelectTrigger>
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="POST">POST</SelectItem>
-                    <SelectItem value="GET">GET</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-            </div>
-            <div className="grid gap-3 sm:grid-cols-2">
-              <div className="flex flex-col gap-1.5">
-                <Label>参数名</Label>
-                <Input
-                  value={form.password}
-                  onChange={(e) => setForm({ ...form, password: e.target.value })}
-                  placeholder="pass"
-                  className="font-mono"
-                />
-                <span className="text-xs text-muted-foreground">马里的参数名（不是口令）</span>
-              </div>
-              <div className="flex flex-col gap-1.5">
-                <Label>备注（可选）</Label>
-                <Input
-                  value={form.note}
-                  onChange={(e) => setForm({ ...form, note: e.target.value })}
-                  placeholder="入口点 / 权限 / 来源"
-                />
-              </div>
-              <div className="flex flex-col gap-1.5">
-                <Label>落地路径（建议填）</Label>
-                <Input
-                  value={form.remote_path}
-                  onChange={(e) => setForm({ ...form, remote_path: e.target.value })}
-                  placeholder="/var/www/html/static_xxx.php"
-                  className="font-mono"
-                />
-                <span className="text-xs text-muted-foreground">清痕迹时靠它删远端文件</span>
-              </div>
-              <div className="flex flex-col gap-1.5">
-                <Label>出口代理（默认跟随平台代理）</Label>
-                <Input
-                  value={form.proxy}
-                  onChange={(e) => setForm({ ...form, proxy: e.target.value })}
-                  placeholder="留空 = 跟随代理订阅里的节点；填 direct 强制直连"
-                  className="font-mono"
-                />
-                <span className="text-xs text-muted-foreground">
-                  留空即走「代理订阅」里选中的节点，换节点出口 IP 会自动跟着变，不用回来改这里。
-                  也可以填 socks5h://user:pass@host:port 单独指定，或填 direct 强制直连。
-                </span>
-              </div>
-              <div className="flex flex-col gap-1.5">
-                <Label>User-Agent（可选）</Label>
-                <Input
-                  value={form.user_agent}
-                  onChange={(e) => setForm({ ...form, user_agent: e.target.value })}
-                  placeholder="留空 = 普通 Chrome UA"
-                  className="font-mono"
-                />
-                <span className="text-xs text-muted-foreground">默认不带任何工具名，别在这里写自己的名字</span>
-              </div>
-            </div>
-            <div className="flex flex-col gap-1.5">
-              <Label>自定义 Header（可选，JSON 对象）</Label>
-              <Textarea
-                value={form.header}
-                onChange={(e) => setForm({ ...form, header: e.target.value })}
-                placeholder={'{"X-Token":"abc"}'}
-                className="font-mono text-xs"
-                rows={3}
-              />
-              <span className="text-xs text-muted-foreground">
-                需要过 WAF 或带 Authorization 时填；Host / Content-Length / Connection 不允许覆盖。
-              </span>
-            </div>
-            <div className="flex justify-end gap-2">
-              <Button type="button" variant="outline" onClick={() => setAddOpen(false)}>
-                取消
-              </Button>
-              <Button type="submit" disabled={saving}>
-                {saving ? <Loader2Icon className="size-4 animate-spin" /> : <PlusIcon className="size-4" />}
-                保存
-              </Button>
-            </div>
-          </form>
-        </DialogContent>
-      </Dialog>
-
-      {/* ---- 删除确认 ---- */}
-      <AlertDialog open={pendingDelete !== null} onOpenChange={(v) => !v && setPendingDelete(null)}>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>
-              {pendingSessions.length > 1 ? `删除选中的 ${pendingSessions.length} 个会话？` : `删除会话「${pendingSessions[0]?.name ?? ""}」？`}
-            </AlertDialogTitle>
-            <AlertDialogDescription>
-              {deleteRemote
-                ? "先删远端的马文件和上传残留，复查确认打不通后再摘掉本机记录。"
-                : "只删本机的 webshells.json 记录，远端 webshell 文件与已上传的文件都保留（痕迹还在）。"}
-            </AlertDialogDescription>
-          </AlertDialogHeader>
-          <div className="space-y-2 rounded-md border p-3 text-xs">
-            <label className="flex cursor-pointer items-start gap-2">
-              <Checkbox
-                checked={deleteRemote}
-                onCheckedChange={(v) => setDeleteRemote(v === true)}
-                className="mt-0.5"
-              />
-              <span>
-                同时删除远端文件（默认不删）
-                <span className="block text-muted-foreground">
-                  勾上：删掉马文件{((pendingSessions?.length ?? 0) > 0) ? "和上传残留" : ""}并复查打不通；
-                  不勾：只摘本机登记，目标上的文件原样保留
-                </span>
-              </span>
-            </label>
-            {pendingSessions.length > 1 ? (
-              <div className="max-h-40 space-y-1 overflow-auto font-mono text-[11px] text-muted-foreground">
-                {pendingSessions.map((s) => (
-                  <div key={s.name} className="truncate">
-                    {s.name} · {s.remote_path || "未记录落地路径"}
-                  </div>
-                ))}
+            {lines.length === 0 ? (
+              <div className="text-zinc-600">
+                {current
+                  ? "输入 id 或点下面的快捷命令开始；↑/↓ 翻历史，Ctrl+L 清屏。"
+                  : "先在左侧添加一个会话，然后在这里执行命令。"}
               </div>
             ) : (
-              <div className="font-mono text-[11px] text-muted-foreground">
-                落地路径：{pendingSessions[0]?.remote_path || "未记录（PHP eval 型可自报路径，命令型需手填）"}
-              </div>
+              lines.map((l) => <TermRow key={l.id} line={l} />)
             )}
-            {(pendingSessions[0]?.artifacts?.length ?? 0) > 0 ? (
-              <div className="text-[11px] text-muted-foreground">
-                上传残留 {pendingSessions[0]?.artifacts?.length} 个：{pendingSessions[0]?.artifacts?.join("、")}
+            {running ? (
+              <div className="flex items-center gap-2 text-cyan-400">
+                <Loader2Icon className="size-3 animate-spin" />
+                执行中…
               </div>
             ) : null}
           </div>
-          <AlertDialogFooter>
-            <AlertDialogCancel>取消</AlertDialogCancel>
-            <AlertDialogAction onClick={() => void doDelete()}>
-              {deleteRemote ? "删除并清痕迹" : "只删登记"}
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
 
-      {/* ---- 批量修改 ---- */}
-      <Dialog open={bulkOpen} onOpenChange={(v) => !v && setBulkOpen(false)}>
-        <DialogContent className="sm:max-w-lg">
-          <DialogHeader>
-            <DialogTitle>批量修改 {checked.length} 个会话</DialogTitle>
-            <DialogDescription className="text-xs">
-              只改下面四个字段，留空表示保持原值。参数名、自定义头、URL 这些页面拿不到（打码），
-              也不会被改动——马不会被改坏。
-            </DialogDescription>
-          </DialogHeader>
-          <div className="grid gap-3">
-            <div className="grid gap-1.5">
-              <Label className="text-xs">备注</Label>
-              <Input
-                value={bulkForm.note}
-                placeholder="留空 = 不改"
-                onChange={(e) => setBulkForm({ ...bulkForm, note: e.target.value })}
-              />
-            </div>
-            <div className="grid gap-1.5">
-              <Label className="text-xs">落地路径（马的远端绝对路径，清痕迹要用）</Label>
-              <Input
-                value={bulkForm.remote_path}
-                placeholder="留空 = 不改；如 /var/www/html/frontend/web/s.php"
-                onChange={(e) => setBulkForm({ ...bulkForm, remote_path: e.target.value })}
-              />
-            </div>
-            <div className="grid gap-1.5">
-              <Label className="text-xs">出口代理</Label>
-              <Input
-                value={bulkForm.proxy}
-                placeholder="留空 = 不改（继续跟随代理订阅）；填 direct = 强制直连"
-                onChange={(e) => setBulkForm({ ...bulkForm, proxy: e.target.value })}
-              />
-            </div>
-            <div className="grid gap-1.5">
-              <Label className="text-xs">User-Agent</Label>
-              <Input
-                value={bulkForm.user_agent}
-                placeholder="留空 = 不改"
-                onChange={(e) => setBulkForm({ ...bulkForm, user_agent: e.target.value })}
-              />
-            </div>
-          </div>
-          <div className="flex justify-end gap-2">
-            <Button variant="outline" onClick={() => setBulkOpen(false)} disabled={bulkBusy}>
-              取消
-            </Button>
-            <Button onClick={() => void bulkSave()} disabled={bulkBusy}>
-              {bulkBusy ? "保存中…" : `保存到 ${checked.length} 个会话`}
-            </Button>
-          </div>
-        </DialogContent>
-      </Dialog>
-
-      {/* ---- Payload 全文抽屉 ---- */}
-      <Sheet open={payloadOpen} onOpenChange={setPayloadOpen}>
-        <SheetContent className="flex w-full flex-col gap-3 overflow-hidden sm:max-w-2xl">
-          <SheetHeader>
-            <SheetTitle className="flex items-center gap-2 font-mono text-sm">
-              {payloadDetail ? <TypeBadge type={payloadDetail.type} /> : null}
-              {payloadDetail?.name ?? "读取中…"}
-              {payloadDetail ? (
-                <span className="font-normal text-xs text-muted-foreground">{fmtSize(payloadDetail.size)}</span>
-              ) : null}
-            </SheetTitle>
-            <SheetDescription className="text-xs">
-              {payloadDetail?.meta.summary ?? "读取 payload 全文"}
-            </SheetDescription>
-          </SheetHeader>
-
-          {payloadLoading ? (
-            <div className="flex items-center gap-2 text-sm text-muted-foreground">
-              <Loader2Icon className="size-4 animate-spin" />
-              读取中…
-            </div>
-          ) : null}
-
-          {!payloadLoading && payloadDetail ? (
-            <div className="flex min-h-0 flex-1 flex-col gap-3">
-              <div className="grid gap-1.5 rounded-lg border bg-muted/30 p-2.5 text-xs">
-                {payloadDetail.meta.scene ? (
-                  <div>
-                    <span className="text-muted-foreground">适用场景：</span>
-                    {payloadDetail.meta.scene}
-                  </div>
-                ) : null}
-                {payloadDetail.meta.perm ? (
-                  <div>
-                    <span className="text-muted-foreground">所需权限：</span>
-                    {payloadDetail.meta.perm}
-                  </div>
-                ) : null}
-                {payloadDetail.meta.bypass ? (
-                  <div>
-                    <span className="text-muted-foreground">绕过点：</span>
-                    {payloadDetail.meta.bypass}
-                  </div>
-                ) : null}
-                {payloadDetail.meta.param ? (
-                  <div className="font-mono">
-                    <span className="text-muted-foreground">参数名：</span>
-                    {payloadDetail.meta.param}
-                  </div>
-                ) : null}
-                <div className="rounded-md bg-primary/5 p-2 font-mono text-[11px]">
-                  <span className="text-muted-foreground">配套 shell_add：</span>
-                  <span>{payloadDetail.meta.mcp || "type=php（eval 语义，命令回显可直接读取）"}</span>
-                </div>
-              </div>
-              <ScrollArea className="min-h-0 flex-1 rounded-md border bg-muted/20">
-                <pre className="whitespace-pre p-3 font-mono text-[11px] leading-relaxed">{payloadDetail.content}</pre>
-              </ScrollArea>
-              <div className="flex shrink-0 justify-end gap-2">
-                <Button variant="outline" onClick={() => void copyText(payloadDetail.content, "payload 全文")}>
-                  <CopyIcon className="size-4" />
-                  复制全文
-                </Button>
-                <Button
-                  variant="outline"
-                  onClick={() => {
-                    setPayloadOpen(false);
-                    openAdd();
-                  }}
+          {/* 终端输入栏（紧贴输出区） */}
+          <div className="shrink-0 border-t border-zinc-800 bg-zinc-950 px-3 py-2">
+            <div className="mb-2 flex flex-wrap gap-1.5">
+              {QUICK.map((cmd) => (
+                <button
+                  key={cmd}
+                  type="button"
+                  disabled={!selected || running}
+                  onClick={() => void run(cmd)}
+                  className="rounded-md border border-zinc-700/70 px-2 py-[2px] font-mono text-[10px] text-zinc-400 transition-colors hover:border-zinc-500 hover:bg-zinc-800/60 hover:text-zinc-200 disabled:cursor-not-allowed disabled:opacity-40"
                 >
-                  <PlusIcon className="size-4" />
-                  用这个马登记会话
-                </Button>
+                  {cmd}
+                </button>
+              ))}
+            </div>
+            <form
+              className="flex items-center gap-2"
+              onSubmit={(e) => {
+                e.preventDefault();
+                void run();
+              }}
+            >
+              <span className="select-none font-mono text-emerald-500">$</span>
+              <input
+                ref={inputRef}
+                value={cmd}
+                onChange={(e) => setCmd(e.target.value)}
+                onKeyDown={onConsoleKeyDown}
+                placeholder={selected ? "输入命令后回车，例如 id" : "先添加一个会话"}
+                disabled={!selected || running}
+                autoComplete="off"
+                spellCheck={false}
+                className="h-8 flex-1 rounded-md border border-zinc-700 bg-zinc-900 px-2 font-mono text-xs text-zinc-100 outline-none placeholder:text-zinc-600 focus:border-emerald-500/60"
+              />
+              <button
+                type="submit"
+                disabled={!selected || running || !cmd.trim()}
+                className="inline-flex h-8 items-center gap-1.5 rounded-md bg-primary px-3 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-40"
+              >
+                {running ? <Loader2Icon className="size-3.5 animate-spin" /> : <SendIcon className="size-3.5" />}
+                执行
+              </button>
+            </form>
+          </div>
+
+          {/* 底部面板（可收起） */}
+          <div className="shrink-0 border-t">
+            <div className="flex h-8 items-center gap-1 border-b px-2">
+              {(["files", "payloads"] as const).map((t) => (
+                <button
+                  key={t}
+                  onClick={() => {
+                    setPanelTab(t);
+                    setPanelOpen(true);
+                  }}
+                  className={cn(
+                    "border-b-2 px-2.5 pb-1 text-xs transition-colors",
+                    panelTab === t && panelOpen
+                      ? "border-primary font-medium text-foreground"
+                      : "border-transparent text-muted-foreground hover:text-foreground",
+                  )}
+                >
+                  {t === "files" ? "文件管理" : "Payload 库"}
+                </button>
+              ))}
+              <button
+                onClick={() => setPanelOpen((v) => !v)}
+                title={panelOpen ? "收起面板" : "展开面板"}
+                className="ml-auto rounded p-1 text-muted-foreground hover:text-foreground"
+                aria-label="收起或展开底部面板"
+              >
+                <ChevronDownIcon className={cn("size-3.5 transition-transform", !panelOpen && "rotate-180")} />
+              </button>
+            </div>
+
+            {panelOpen ? (
+              <div className="h-[260px] overflow-hidden">
+                {panelTab === "files" ? (
+                  <div className="flex h-full flex-col">
+                    {/* 路径行 */}
+                    <div className="flex shrink-0 items-center gap-1.5 border-b px-2 py-1.5">
+                      <button
+                        onClick={() => void listRemote(parentPath(remotePath))}
+                        disabled={!current || remotePath === "/"}
+                        title="返回上级"
+                        className="inline-flex h-7 items-center gap-1 rounded-md border px-2 text-xs text-muted-foreground transition-colors hover:bg-accent hover:text-foreground disabled:opacity-40"
+                      >
+                        <FolderUpIcon className="size-3.5" />
+                        上级
+                      </button>
+                      <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto px-1">
+                        <button
+                          onClick={() => void listRemote("/")}
+                          className="shrink-0 font-mono text-[11px] text-muted-foreground hover:text-foreground"
+                        >
+                          /
+                        </button>
+                        {crumbs.map((c, i) => (
+                          <span key={i} className="flex shrink-0 items-center gap-1">
+                            <span className="text-muted-foreground/40">/</span>
+                            <button
+                              onClick={() => void listRemote(`/${crumbs.slice(0, i + 1).join("/")}`)}
+                              className="font-mono text-[11px] text-muted-foreground hover:text-foreground"
+                            >
+                              {c}
+                            </button>
+                          </span>
+                        ))}
+                      </div>
+                      <input
+                        value={pathInput}
+                        onChange={(e) => setPathInput(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") {
+                            e.preventDefault();
+                            void listRemote(pathInput.trim() || "/");
+                          }
+                        }}
+                        placeholder="/var/www/html"
+                        disabled={!current}
+                        className="h-7 w-48 rounded-md border bg-transparent px-2 font-mono text-[11px] outline-none focus:border-primary"
+                      />
+                      <button
+                        onClick={() => void listRemote(pathInput.trim() || "/")}
+                        disabled={!current || fileBusy === "list"}
+                        className="inline-flex h-7 items-center gap-1 rounded-md border px-2 text-xs transition-colors hover:bg-accent disabled:opacity-40"
+                      >
+                        {fileBusy === "list" ? <Loader2Icon className="size-3.5 animate-spin" /> : <RefreshCwIcon className="size-3.5" />}
+                        列出
+                      </button>
+                    </div>
+
+                    {/* 文件列表（独立滚动） */}
+                    <div className="scrollbar-thin min-h-0 flex-1 overflow-y-auto overscroll-contain">
+                      {files.length === 0 && fileRaw === "" ? (
+                        <p className="px-3 py-8 text-center text-xs text-muted-foreground">
+                          {current ? "输入路径后点「列出」" : "先添加一个会话"}
+                        </p>
+                      ) : files.length === 0 ? (
+                        <pre className="p-3 font-mono text-[11px] text-muted-foreground">{fileRaw}</pre>
+                      ) : (
+                        <table className="w-full text-[11px]">
+                          <thead className="sticky top-0 bg-background">
+                            <tr className="border-b text-left text-muted-foreground">
+                              <th className="px-3 py-1.5 font-medium">名称</th>
+                              <th className="w-20 px-2 py-1.5 font-medium">大小</th>
+                              <th className="w-24 px-2 py-1.5 font-medium">权限</th>
+                              <th className="w-28 px-2 py-1.5 font-medium">时间</th>
+                              <th className="w-16 px-2 py-1.5" />
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {files.map((f) => (
+                              <tr key={f.name} className="border-b border-border/40 transition-colors hover:bg-muted/40">
+                                <td className="max-w-0 px-3 py-1.5">
+                                  <button
+                                    onClick={() => (f.dir ? void listRemote(joinRemote(remotePath, f.name)) : void downloadFile(joinRemote(remotePath, f.name)))}
+                                    className="flex w-full items-center gap-1.5 truncate text-left font-mono"
+                                    title={f.name}
+                                  >
+                                    {f.dir ? <FolderIcon className="size-3.5 shrink-0 text-muted-foreground" /> : <FileIcon className="size-3.5 shrink-0 text-muted-foreground" />}
+                                    <span className="truncate">{f.name}</span>
+                                  </button>
+                                </td>
+                                <td className="px-2 py-1.5 font-mono text-muted-foreground">{fmtSize(f.size)}</td>
+                                <td className="px-2 py-1.5 font-mono text-muted-foreground/70">{f.perm}</td>
+                                <td className="px-2 py-1.5 font-mono text-muted-foreground/70">{f.mtime}</td>
+                                <td className="px-2 py-1.5">
+                                  {!f.dir ? (
+                                    <button
+                                      onClick={() => void downloadFile(joinRemote(remotePath, f.name))}
+                                      className="rounded p-1 text-muted-foreground hover:text-foreground"
+                                      title="下载"
+                                    >
+                                      <DownloadIcon className="size-3" />
+                                    </button>
+                                  ) : null}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      )}
+                    </div>
+
+                    {/* 上传行 */}
+                    <div className="flex shrink-0 items-end gap-2 border-t px-2 py-2">
+                      <div className="flex min-w-0 flex-1 flex-col gap-1">
+                        <label className="text-[10px] text-muted-foreground">本地文件</label>
+                        <input
+                          type="file"
+                          onChange={(e) => void pickUploadFile(e.target.files?.[0] ?? null)}
+                          disabled={!current}
+                          className="h-7 w-full rounded-md border bg-transparent px-1 text-[11px] file:mr-2 file:rounded file:border-0 file:bg-muted file:px-2 file:py-0.5 file:text-[10px]"
+                        />
+                      </div>
+                      <div className="flex min-w-0 flex-1 flex-col gap-1">
+                        <label className="text-[10px] text-muted-foreground">上传到</label>
+                        <input
+                          value={uploadPath}
+                          onChange={(e) => setUploadPath(e.target.value)}
+                          placeholder="/tmp/tool"
+                          disabled={!current}
+                          className="h-7 w-full rounded-md border bg-transparent px-2 font-mono text-[11px] outline-none focus:border-primary"
+                        />
+                      </div>
+                      <button
+                        onClick={() => void doUpload()}
+                        disabled={!current || !uploadB64 || fileBusy === "upload"}
+                        className="inline-flex h-7 items-center gap-1 rounded-md bg-primary px-2.5 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-40"
+                      >
+                        {fileBusy === "upload" ? <Loader2Icon className="size-3.5 animate-spin" /> : <UploadIcon className="size-3.5" />}
+                        上传
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  /* Payload 库 */
+                  <div className="scrollbar-thin h-full overflow-y-auto overscroll-contain">
+                    {payloadEntries.length === 0 ? (
+                      <p className="px-3 py-8 text-center text-xs text-muted-foreground">Payload 库为空</p>
+                    ) : (
+                      <table className="w-full text-[11px]">
+                        <thead className="sticky top-0 bg-background">
+                          <tr className="border-b text-left text-muted-foreground">
+                            <th className="px-3 py-1.5 font-medium">名称</th>
+                            <th className="w-24 px-2 py-1.5 font-medium">类型</th>
+                            <th className="w-20 px-2 py-1.5 font-medium">大小</th>
+                            <th className="w-16 px-2 py-1.5" />
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {payloadEntries.map((p) => (
+                            <tr key={p.name} className="border-b border-border/40 transition-colors hover:bg-muted/40">
+                              <td className="max-w-0 px-3 py-1.5">
+                                <button
+                                  onClick={() => void openPayload(p.name)}
+                                  className="w-full truncate text-left font-mono hover:text-primary"
+                                  title={p.name}
+                                >
+                                  {p.name}
+                                </button>
+                              </td>
+                              <td className="px-2 py-1.5 text-muted-foreground">{p.type}</td>
+                              <td className="px-2 py-1.5 font-mono text-muted-foreground">{fmtSize(p.size)}</td>
+                              <td className="px-2 py-1.5">
+                                <button
+                                  onClick={() => void copyText(p.name, "路径")}
+                                  className="rounded p-1 text-muted-foreground hover:text-foreground"
+                                  title="复制路径"
+                                >
+                                  <CopyIcon className="size-3" />
+                                </button>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    )}
+                  </div>
+                )}
+              </div>
+            ) : null}
+          </div>
+        </div>
+      </div>
+
+      {/* ---------- 新增会话 ---------- */}
+      {addOpen ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={() => setAddOpen(false)}>
+          <div
+            className="w-full max-w-md rounded-lg border bg-background p-4 shadow-lg"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="mb-3 flex items-center justify-between">
+              <h2 className="text-sm font-semibold">新增会话</h2>
+              <button onClick={() => setAddOpen(false)} className="rounded p-1 text-muted-foreground hover:text-foreground">
+                <XIcon className="size-4" />
+              </button>
+            </div>
+            <div className="space-y-3">
+              <div className="grid grid-cols-2 gap-2">
+                <label className="flex flex-col gap-1">
+                  <span className="text-[10px] text-muted-foreground">名称</span>
+                  <input
+                    value={form.name}
+                    onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
+                    placeholder="目标主机备注"
+                    className="h-8 rounded-md border bg-transparent px-2 text-xs outline-none focus:border-primary"
+                  />
+                </label>
+                <label className="flex flex-col gap-1">
+                  <span className="text-[10px] text-muted-foreground">类型</span>
+                  <select
+                    value={form.type}
+                    onChange={(e) => setForm((f) => ({ ...f, type: e.target.value }))}
+                    className="h-8 rounded-md border bg-transparent px-2 text-xs outline-none"
+                  >
+                    {Object.entries(TYPE_LABEL).map(([k, v]) => (
+                      <option key={k} value={k}>{v}</option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+              <label className="flex flex-col gap-1">
+                <span className="text-[10px] text-muted-foreground">地址（URL，query 里的 pass/pwd 会打码）</span>
+                <input
+                  value={form.url}
+                  onChange={(e) => setForm((f) => ({ ...f, url: e.target.value }))}
+                  placeholder="http://target/shell.php?pass=cmd"
+                  className="h-8 rounded-md border bg-transparent px-2 font-mono text-xs outline-none focus:border-primary"
+                />
+              </label>
+              <div className="grid grid-cols-2 gap-2">
+                <label className="flex flex-col gap-1">
+                  <span className="text-[10px] text-muted-foreground">方法</span>
+                  <select
+                    value={form.method}
+                    onChange={(e) => setForm((f) => ({ ...f, method: e.target.value }))}
+                    className="h-8 rounded-md border bg-transparent px-2 text-xs outline-none"
+                  >
+                    {["GET", "POST"].map((m) => (
+                      <option key={m} value={m}>{m}</option>
+                    ))}
+                  </select>
+                </label>
+                <label className="flex flex-col gap-1">
+                  <span className="text-[10px] text-muted-foreground">备注</span>
+                  <input
+                    value={form.note}
+                    onChange={(e) => setForm((f) => ({ ...f, note: e.target.value }))}
+                    placeholder="可选"
+                    className="h-8 rounded-md border bg-transparent px-2 text-xs outline-none focus:border-primary"
+                  />
+                </label>
+              </div>
+              <div className="flex justify-end gap-2 pt-1">
+                <button
+                  onClick={() => setAddOpen(false)}
+                  className="inline-flex h-8 items-center rounded-md border px-3 text-xs transition-colors hover:bg-accent"
+                >
+                  取消
+                </button>
+                <button
+                  onClick={() => void saveSession()}
+                  disabled={saving || !form.name.trim() || !form.url.trim()}
+                  className="inline-flex h-8 items-center gap-1.5 rounded-md bg-primary px-3 text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-40"
+                >
+                  {saving ? <Loader2Icon className="size-3.5 animate-spin" /> : <CheckIcon className="size-3.5" />}
+                  登记
+                </button>
               </div>
             </div>
-          ) : null}
-        </SheetContent>
-      </Sheet>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
