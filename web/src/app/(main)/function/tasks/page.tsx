@@ -1241,6 +1241,20 @@ const TaskRow = React.memo(function TaskRow({
       </TableCell>
       <TableCell>
         <StatusBadge domain="task" value={task.status} dot />
+        {/* 出口：绑了 VPN 的任务要能一眼看到"现在从哪个 IP 出去"。 */}
+        {task.egress && (
+          <div
+            className="mt-1 flex items-center gap-1 text-[11px] text-muted-foreground"
+            title={
+              task.egress_ip
+                ? `${task.egress_label || "VPN"} · 实测出口 ${task.egress_ip}`
+                : `${task.egress_label || "VPN"} · 尚未建链`
+            }
+          >
+            <span className="truncate max-w-24">{task.egress_label || "VPN"}</span>
+            <span className="font-mono">{task.egress_ip || "—"}</span>
+          </div>
+        )}
       </TableCell>
       <TableCell className="text-muted-foreground text-center text-xs tabular-nums">
         {typeof task.goals_total === "number" && task.goals_total > 0 ? (

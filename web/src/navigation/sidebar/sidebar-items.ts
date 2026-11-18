@@ -24,6 +24,7 @@ import {
   Target,
   Terminal,
   Waypoints,
+  ShieldCheck,
   Wrench,
 } from "lucide-react";
 
@@ -96,6 +97,8 @@ export const sidebarItems: NavGroup[] = [
       { id: "skills", title: "Skill", url: "/system/skills", icon: Sparkles },
       { id: "tools", title: "工具", url: "/system/tools", icon: Wrench },
       { id: "proxy", title: "代理订阅", url: "/system/proxy", icon: Waypoints },
+      // 与「代理订阅」并列：VPN 出口决定任务从哪个地址出网，属于运维常看的一项。
+      { id: "vpn", title: "VPN 出口", url: "/system/vpn", icon: ShieldCheck },
       { id: "notify", title: "通知推送", url: "/system/notify", icon: BellRing },
       { id: "intercept", title: "拦截规则", url: "/system/intercept", icon: ShieldAlert },
       { id: "asset-intercept", title: "资产拦截", url: "/system/intercept/assets", icon: Ban },

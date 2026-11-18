@@ -37,6 +37,12 @@ export interface Task {
   llm_failover_reason?: string;
   source_task_ids?: string[]; // directly related tasks inherited as read-only context
   archive_blocked_by_task_id?: string; // live direct dependent that must be archived first
+  // 出口绑定与实时状态：绑了 VPN 的任务要能一眼看到"现在从哪个 IP 出去"。
+  egress?: string; // ""=平台全局出口；"vpn:<id>"=该 OpenVPN 隧道
+  egress_label?: string; // 出口名称（"360众测"），出口已删时为提示文案
+  vpn_username?: string; // 该项目账号（密码永远不回传）
+  egress_ip?: string; // 该隧道**实测**出口 IP（未建链时为空）
+  egress_state?: string; // stopped / starting / up / error
   company_ids?: number[]; // associated company scopes; current company assets join the task at creation
   coverage_enabled?: boolean; // 资产覆盖度功能开关(创建时定,默认开)；false=不计算/不展示覆盖度
 }
