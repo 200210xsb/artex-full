@@ -18,6 +18,7 @@ import {
   FileIcon,
   FolderIcon,
   FolderUpIcon,
+  HelpCircleIcon,
   Loader2Icon,
   PlusIcon,
   RefreshCwIcon,
@@ -79,13 +80,28 @@ const TYPE_HINT: Record<string, string> = {
   aspx: "命令型马：Process.Start(cmd.exe /c …) 执行参数",
 };
 
-/** 类型徽章配色：php 绿、php_raw 青、jsp 琥珀、aspx 紫。 */
+/**
+ * 类型徽章配色。按"入口形态"分两类就够：
+ * W 型（eval 一句话）绿色，其他 shell（代码马 / 命令马 / 内存马）灰色。
+ * 具体语言靠徽章文字区分，不靠颜色——颜色留给状态和分组，视觉才不吵。
+ */
 const TYPE_BADGE: Record<string, string> = {
   php: "border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400",
-  php_raw: "border-teal-500/30 bg-teal-500/10 text-teal-600 dark:text-teal-400",
-  jsp: "border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-400",
-  aspx: "border-violet-500/30 bg-violet-500/10 text-violet-600 dark:text-violet-400",
+  php_raw: "border-slate-500/30 bg-slate-500/10 text-slate-600 dark:text-slate-300",
+  jsp: "border-slate-500/30 bg-slate-500/10 text-slate-600 dark:text-slate-300",
+  aspx: "border-slate-500/30 bg-slate-500/10 text-slate-600 dark:text-slate-300",
 };
+
+/** 会话执行状态：本地记录，执行成功/失败后更新。 */
+type SessionState = "pending" | "ok" | "error";
+const STATE_STYLE: Record<SessionState, { label: string; cls: string }> = {
+  pending: { label: "待验证", cls: "border-orange-500/40 bg-orange-500/10 text-orange-600 dark:text-orange-400" },
+  ok: { label: "已连通", cls: "border-emerald-500/40 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400" },
+  error: { label: "失效", cls: "border-red-500/40 bg-red-500/10 text-red-600 dark:text-red-400" },
+};
+
+/** W 组 = eval 一句话（php）；其余归"其他 shell"。 */
+const isWType = (t: string) => t === "php";
 
 /** 终端快捷命令胶囊。 */
 const QUICK = ["id", "whoami", "uname -a", "pwd", "ls -la"];
@@ -344,6 +360,11 @@ export default function WebshellPage() {
   const [checked, setChecked] = React.useState<string[]>([]);
   // 会话多了以后逐个找很费劲：按名称/类型/地址做本地过滤。
   const [q, setQ] = React.useState("");
+  const [filter, setFilter] = React.useState<"all" | "w" | "other">("all");
+  const [openW, setOpenW] = React.useState(true);
+  const [openOther, setOpenOther] = React.useState(true);
+  // 每个会话的执行状态（后端没有这个字段，按执行结果在页面内记）
+  const [stateById, setStateById] = React.useState<Record<string, SessionState>>({});
   const [bulkOpen, setBulkOpen] = React.useState(false);
   const [bulkBusy, setBulkBusy] = React.useState(false);
   // 批量改只动这四个字段：留空 = 保持原值。参数名/头/URL 这些页面拿不到（打码），
@@ -479,11 +500,13 @@ export default function WebshellPage() {
       });
       setConn("ok");
       setConnMsg(`${r.mode} · ${r.elapsed_ms}ms`);
+      setStateById((m) => ({ ...m, [target]: "ok" }));
     } catch (err) {
       const msg = errMsg(err, "执行失败");
       push(target, { kind: "err", text: msg });
       setConn("error");
       setConnMsg(msg);
+      setStateById((m) => ({ ...m, [target]: "error" }));
       toast.error(msg);
     } finally {
       setRunning(false);
@@ -775,51 +798,80 @@ export default function WebshellPage() {
 
   const filteredSessions = React.useMemo(() => {
     const k = q.trim().toLowerCase();
-    if (!k) return sessions;
-    return sessions.filter((it) => JSON.stringify(it).toLowerCase().includes(k));
-  }, [sessions, q]);
+    let list = sessions;
+    if (k) list = list.filter((it) => JSON.stringify(it).toLowerCase().includes(k));
+    if (filter === "w") list = list.filter((it) => isWType(it.type));
+    if (filter === "other") list = list.filter((it) => !isWType(it.type));
+    // W 组在前、组内按名字排，保证分组标题只出现一次
+    return [...list].sort((a, b) => {
+      const aw = isWType(a.type) ? 0 : 1;
+      const bw = isWType(b.type) ? 0 : 1;
+      return aw !== bw ? aw - bw : a.name.localeCompare(b.name);
+    });
+  }, [sessions, q, filter]);
 
   return (
-    <div className="mx-auto flex min-h-0 w-full max-w-[1500px] flex-1 flex-col gap-4">
-      {/* 顶部：标题 + 状态 */}
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div className="min-w-0">
-          <div className="flex items-center gap-2">
-            <h1 className="font-heading font-semibold text-xl">WebShell</h1>
-            <ConnBadge state={conn} compact />
-          </div>
-          <p className="text-muted-foreground text-sm">
-            会话登记与命令控制台 · 与 MCP 共用 <span className="font-mono text-xs">webshells.json</span>
-          </p>
-        </div>
+    <div className="mx-auto flex min-h-0 w-full max-w-[1500px] flex-1 flex-col gap-4 overflow-hidden">
+      {/* 全局状态条：左侧总览、中间当前会话、右侧操作 */}
+      <div className="flex flex-wrap items-center gap-3 rounded-lg border bg-card/40 px-3 py-2">
         <div className="flex items-center gap-2">
-          <Button variant="outline" size="sm" onClick={() => void loadSessions()} disabled={loading}>
-            {loading ? <Loader2Icon className="size-4 animate-spin" /> : <RefreshCwIcon className="size-4" />}
+          <h1 className="font-heading text-base font-semibold">WebShell</h1>
+          <Badge variant="secondary" className="font-mono text-[10px] tabular-nums">
+            {sessions.length} 会话
+          </Badge>
+          <Badge variant="outline" className="font-mono text-[10px] tabular-nums">
+            {sessions.filter((x) => (stateById[x.name] ?? "pending") === "ok").length} 活跃
+          </Badge>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="size-6 text-muted-foreground"
+            title={Object.entries(TYPE_HINT).map(([k, v]) => `${k}: ${v}`).join("\n")}
+            aria-label="连接方式说明"
+          >
+            <HelpCircleIcon className="size-3.5" />
+          </Button>
+        </div>
+
+        <div className="flex min-w-0 items-center gap-2 rounded-full border bg-muted/30 px-3 py-1">
+          {current ? (
+            <>
+              <ConnBadge state={conn} compact />
+              <span className="max-w-40 truncate text-xs font-medium" title={current.name}>{current.name}</span>
+              <span className="text-muted-foreground/60">·</span>
+              <span className="font-mono text-[10px] text-muted-foreground">{current.type}</span>
+              <span className="text-muted-foreground/60">·</span>
+              <span className="truncate font-mono text-[10px] text-muted-foreground/70" title={current.url}>
+                {current.method || current.url}
+              </span>
+            </>
+          ) : (
+            <span className="text-xs text-muted-foreground">左侧选一个会话</span>
+          )}
+        </div>
+
+        <div className="ml-auto flex items-center gap-2">
+          {checked.length > 0 ? (
+            <>
+              <span className="text-xs text-muted-foreground">已选 {checked.length}</span>
+              <Button size="sm" variant="outline" className="h-8" onClick={openBulkEdit}>批量修改</Button>
+              <Button size="sm" variant="outline" className="h-8" onClick={() => setPendingDelete(checked)}>批量删除</Button>
+              <Button size="sm" variant="ghost" className="h-8" onClick={() => setChecked([])}>清空</Button>
+            </>
+          ) : null}
+          <Button variant="outline" size="sm" className="h-8" onClick={() => void loadSessions()} disabled={loading}>
+            {loading ? <Loader2Icon className="size-3.5 animate-spin" /> : <RefreshCwIcon className="size-3.5" />}
             刷新
           </Button>
-          <Button size="sm" onClick={openAdd}>
-            <PlusIcon className="size-4" />
+          <Button size="sm" className="h-8" onClick={openAdd}>
+            <PlusIcon className="size-3.5" />
             添加会话
           </Button>
         </div>
       </div>
 
-      <div className="grid gap-3 sm:grid-cols-[1.6fr_1fr_1fr]">
-        <Stat label="会话数" value={sessions.length} hint={storePath || "webshells.json"} />
-        <Stat
-          label="当前选中"
-          value={<span className="text-base font-semibold">{current ? current.name : "未选择"}</span>}
-          hint={current ? `${TYPE_LABEL[current.type] ?? current.type} · ${current.method}` : "左侧点一个会话"}
-        />
-        <Stat
-          label="连接状态"
-          value={<ConnBadge state={conn} />}
-          hint={connMsg || (current ? "执行一条命令即可验证" : "先添加一个会话")}
-        />
-      </div>
-
       {/* 主体：左会话栏 + 右侧上下 6:4 */}
-      <div className="grid items-start gap-4 lg:grid-cols-[280px_minmax(0,1fr)] lg:gap-6">
+      <div className="grid min-h-0 items-start gap-4 lg:grid-cols-[300px_minmax(0,1fr)] lg:gap-4">
         {/* ---- 左：会话列表 ---- */}
         <Card className="flex min-w-0 flex-col gap-3 py-4 lg:sticky lg:top-4">
           <CardHeader className="px-4">
@@ -833,14 +885,26 @@ export default function WebshellPage() {
               点一下切换会话；左侧勾选后可批量改 / 批量删（删除默认只摘登记，可勾选连远端一起删）。
             </CardDescription>
             {sessions.length > 0 ? (
-              <div className="relative pt-1">
-                <SearchIcon className="pointer-events-none absolute top-1/2 left-2 size-3.5 -translate-y-1/2 text-muted-foreground" />
-                <Input
-                  value={q}
-                  onChange={(e) => setQ(e.target.value)}
-                  placeholder="搜索会话：名称 / 类型 / 地址"
-                  className="h-8 pl-7 text-xs"
-                />
+              <div className="flex items-center gap-2 pt-1">
+                <div className="relative min-w-0 flex-1">
+                  <SearchIcon className="pointer-events-none absolute top-1/2 left-2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+                  <Input
+                    value={q}
+                    onChange={(e) => setQ(e.target.value)}
+                    placeholder="搜索：名称 / 类型 / 地址"
+                    className="h-8 pl-7 text-xs"
+                  />
+                </div>
+                <select
+                  value={filter}
+                  onChange={(e) => setFilter(e.target.value as "all" | "w" | "other")}
+                  className="h-8 rounded-md border bg-transparent px-2 text-xs text-muted-foreground outline-none"
+                  aria-label="按入口形态筛选"
+                >
+                  <option value="all">全部</option>
+                  <option value="w">W 一句话</option>
+                  <option value="other">其他 Shell</option>
+                </select>
               </div>
             ) : null}
             {sessions.length > 0 ? (
@@ -894,7 +958,26 @@ export default function WebshellPage() {
               ) : (
               <ScrollArea className="max-h-[min(52vh,420px)] lg:max-h-[calc(100vh-26rem)]">
                 <div className="flex flex-col gap-0.5 pr-2">
-                  {filteredSessions.map((s) => {
+                  {(["w", "other"] as const).map((gk) => {
+                    const items = filteredSessions.filter((x) => isWType(x.type) === (gk === "w"));
+                    if (filter !== "all" && filter !== gk) return null;
+                    const open = gk === "w" ? openW : openOther;
+                    const toggle = () => (gk === "w" ? setOpenW((v) => !v) : setOpenOther((v) => !v));
+                    return (
+                      <div key={gk}>
+                        <button
+                          type="button"
+                          onClick={toggle}
+                          className="flex w-full items-center gap-2 px-3 py-1.5 text-[11px] font-medium text-muted-foreground hover:text-foreground"
+                        >
+                          <span className={cn("size-1.5 rounded-full", gk === "w" ? "bg-emerald-500" : "bg-slate-400")} />
+                          {gk === "w" ? "W 一句话" : "其他 Shell"}
+                          <span className="tabular-nums text-muted-foreground/60">{items.length}</span>
+                          <ChevronRightIcon
+                            className={cn("ml-auto size-3 transition-transform", open && "rotate-90")}
+                          />
+                        </button>
+                        {open ? items.map((s) => {
                     const active = s.name === selected;
                     return (
                       <div
@@ -927,6 +1010,14 @@ export default function WebshellPage() {
                           <span className="flex w-full items-center gap-2">
                             <span className="min-w-0 flex-1 truncate font-medium text-sm">{s.name}</span>
                             <TypeBadge type={s.type} className="shrink-0" />
+                            <span
+                              className={cn(
+                                "shrink-0 rounded border px-1.5 py-0.5 text-[10px] leading-none",
+                                STATE_STYLE[stateById[s.name] ?? "pending"].cls,
+                              )}
+                            >
+                              {STATE_STYLE[stateById[s.name] ?? "pending"].label}
+                            </span>
                           </span>
                           <span className="w-full truncate font-mono text-[11px] text-muted-foreground/70" title={s.url}>
                             {s.url}
@@ -957,6 +1048,9 @@ export default function WebshellPage() {
                         </Button>
                       </div>
                     );
+                        }) : null}
+                      </div>
+                    );
                   })}
                 </div>
               </ScrollArea>
@@ -965,7 +1059,7 @@ export default function WebshellPage() {
         </Card>
 
         {/* ---- 右：控制台 + Tab 区（桌面 6:4） ---- */}
-        <div className="grid min-w-0 gap-4 lg:h-[calc(100vh-17.5rem)] lg:min-h-[520px] lg:grid-rows-[3fr_2fr] lg:gap-6">
+        <div className="grid min-w-0 gap-4 lg:h-[calc(100vh-13rem)] lg:min-h-[520px] lg:grid-rows-[3fr_2fr] lg:gap-4">
           {/* 命令控制台 */}
           <Card className="flex min-h-[360px] min-w-0 flex-col gap-0 overflow-hidden py-0 lg:min-h-0">
             <CardHeader className="shrink-0 gap-1 border-b px-4 py-3">
@@ -979,7 +1073,7 @@ export default function WebshellPage() {
                     ) : null}
                   </CardTitle>
                   <CardDescription className="truncate text-xs">
-                    {current ? (TYPE_HINT[current.type] ?? "回车执行") : "先在左侧添加一个会话，才能执行命令"}
+                    {current ? (TYPE_LABEL[current.type] ?? "回车执行") : "先在左侧添加一个会话，才能执行命令"}
                   </CardDescription>
                 </div>
                 <div className="flex shrink-0 items-center gap-2">
