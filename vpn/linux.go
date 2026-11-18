@@ -120,8 +120,11 @@ func (m *Manager) bringUp(ctx context.Context, inst *instance) error {
 		return err
 	}
 	inst.slot, inst.hostIP, inst.nsIP = slot, hostIP, nsIP
-	ns := fmt.Sprintf("%s%d", netnsPrefix, p.ID)
-	veth := fmt.Sprintf("%s%d", vethPrefix, p.ID)
+	// 命名空间/veth 名字用**槽位**而不是配置 id：同一份 .ovpn 的不同账号各是一条
+	// 隧道，用配置 id 命名会让后建的那条去删前一条的命名空间（真机验证时踩到：
+	// 一个错误账号的建链把正常隧道顶掉了，日志里表现为好隧道莫名探测失败再重建）。
+	ns := fmt.Sprintf("%s%d", netnsPrefix, slot)
+	veth := fmt.Sprintf("%s%d", vethPrefix, slot)
 
 	ext, err := defaultIface()
 	if err != nil {
