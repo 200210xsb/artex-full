@@ -75,7 +75,11 @@ func (s *Server) llmKeyHuntStart(w http.ResponseWriter, r *http.Request) {
 // llmKeyHuntStatus 查询密钥狩猎状态。
 func (s *Server) llmKeyHuntStatus(w http.ResponseWriter, r *http.Request) {
 	h := s.llmKeyHunter()
-	writeJSON(w, 200, map[string]any{"ready": h.Ready(), "running": h.Running(), "found": h.Found()})
+	dorks, files, found, lastErr := h.Progress()
+	writeJSON(w, 200, map[string]any{
+		"ready": h.Ready(), "running": h.Running(), "found": found,
+		"dorks_done": dorks, "files_fetched": files, "last_error": lastErr,
+	})
 }
 
 // llmKeyStats 按厂商/来源统计密钥。
@@ -145,6 +149,7 @@ func (s *Server) llmHuntScan(w http.ResponseWriter, r *http.Request) {
 		Dorks         string `json:"dorks"`       // 自定义搜索词（每行一个；空=内置）
 		MaxFromSearch int    `json:"max_from_search"`
 		AllowAuth     bool   `json:"allow_auth"` // 默认口令探测（POST，仅授权目标）
+		HuntLeaks     bool   `json:"hunt_leaks"` // 先找"响应里已含 key"的 URL（Hunter/Quake）
 		MaxTargets    int    `json:"max_targets"`
 	}
 	if err := decode(r, &req); err != nil {
@@ -189,8 +194,8 @@ func (s *Server) llmHuntScan(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if len(targets) == 0 && len(dorks) == 0 {
-		writeErr(w, 400, "请粘贴目标清单、勾选「从资产库扫描」，或勾选「用搜索引擎发现」")
+	if len(targets) == 0 && len(dorks) == 0 && !req.HuntLeaks {
+		writeErr(w, 400, "请粘贴目标清单、勾选「从资产库扫描」「用搜索引擎发现」，或勾选「先找泄漏的密钥文件」")
 		return
 	}
 
@@ -199,6 +204,7 @@ func (s *Server) llmHuntScan(w http.ResponseWriter, r *http.Request) {
 		Dorks:           dorks,
 		MaxFromSearch:   req.MaxFromSearch,
 		AllowAuthChecks: req.AllowAuth,
+		HuntLeaks:       req.HuntLeaks,
 		// 探测目标走全局代理出口（不暴露 VPS 自己的 IP）。
 		Proxy: s.m.GlobalProxy(),
 	})

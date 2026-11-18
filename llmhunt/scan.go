@@ -56,6 +56,9 @@ type Options struct {
 	// AllowAuthChecks 允许"默认口令探测"（每个平台最多 2 组，失败即止）。
 	// 默认关闭：这是唯一会用 POST 的动作，只适合在明确授权的目标上开。
 	AllowAuthChecks bool
+	// HuntLeaks 先跑"泄漏文件狩猎"：用 Hunter/Quake 找响应体里本来就含 key 的 URL。
+	// 这是拿 key 最短的路径，优先级高于"先找实例再猜路径"。
+	HuntLeaks bool
 	// Proxy 是探测目标时使用的出口代理（http/socks5）。空 = 直连。
 	// 走全局代理的目的很实际：别把 VPS 自己的 IP 打进各种黑名单，也别让
 	// 目标看到"从机房 IP 来的扫描"。搜索/空间测绘的 API 调用仍走直连 ——
@@ -130,7 +133,7 @@ func (s *Scanner) Start(opts Options) (int64, error) {
 		return 0, fmt.Errorf("已有扫描在进行中")
 	}
 	// 允许"只有搜索词"的扫描：目标由搜索引擎发现。
-	if len(opts.Targets) == 0 && len(opts.Dorks) == 0 {
+	if len(opts.Targets) == 0 && len(opts.Dorks) == 0 && !opts.HuntLeaks {
 		s.mu.Unlock()
 		return 0, fmt.Errorf("没有目标")
 	}
@@ -195,7 +198,14 @@ func (s *Scanner) run(ctx context.Context, scanID int64, opts Options) {
 		_ = s.pg.UpdateLLMScan(scanID, done, assets, keys, status, opts.Note)
 	}()
 
-	// 搜索发现：放在后台做，别把 HTTP 请求拖成长连接。
+	// ① 泄漏文件狩猎优先：直接找"响应里已经有 key"的 URL。
+	if opts.HuntLeaks {
+		fetched, found := s.huntLeaks(ctx)
+		s.logf("泄漏文件狩猎：抓取 %d 个 URL，命中 %d 条 key", fetched, found)
+		_ = s.pg.UpdateLLMScan(scanID, s.done, s.assets, s.keys, "", "")
+	}
+
+	// ② 搜索发现：放在后台做，别把 HTTP 请求拖成长连接。
 	targets := opts.Targets
 	if len(opts.Dorks) > 0 {
 		found := s.discoverTargets(ctx, opts.Dorks, opts.MaxFromSearch)

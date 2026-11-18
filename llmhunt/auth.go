@@ -56,6 +56,12 @@ var authChecks = []authCheck{
 var defaultCreds = [][2]string{
 	{"root", "123456"},
 	{"admin", "admin"},
+	{"admin", "123456"},
+	{"admin", "password"},
+	{"test", "test"},
+	{"guest", "guest"},
+	{"root", "root"},
+	{"user", "user"},
 }
 
 // tryDefaultAuth 尝试默认口令；成功则带 token 去读 key 接口。

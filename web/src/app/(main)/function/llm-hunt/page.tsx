@@ -64,6 +64,8 @@ export default function LLMHuntPage() {
   const [maxFromSearch, setMaxFromSearch] = React.useState("12");
   // 默认口令探测是唯一会发 POST 的动作，默认关闭。
   const [allowAuth, setAllowAuth] = React.useState(false);
+  // 泄漏文件狩猎：直接找"响应体里已含 key"的 URL（Hunter/Quake），是拿 key 最短的路径。
+  const [huntLeaks, setHuntLeaks] = React.useState(true);
 
   const [status, setStatus] = React.useState<ScanStatus>({ running: false, last: null });
   const [assets, setAssets] = React.useState<Asset[]>([]);
@@ -71,7 +73,10 @@ export default function LLMHuntPage() {
   const [busy, setBusy] = React.useState(false);
   const [revealed, setRevealed] = React.useState<Record<number, string>>({});
   // 密钥狩猎（GitHub 公开仓库）与统计
-  const [ghStatus, setGhStatus] = React.useState<{ ready: boolean; running: boolean; found: number } | null>(null);
+  const [ghStatus, setGhStatus] = React.useState<{
+    ready: boolean; running: boolean; found: number;
+    dorks_done?: number; files_fetched?: number; last_error?: string;
+  } | null>(null);
   const [stats, setStats] = React.useState<{ by_provider: Record<string, number>; by_source: Record<string, number>; total: number } | null>(null);
 
   const load = React.useCallback(() => {
@@ -137,6 +142,7 @@ export default function LLMHuntPage() {
           dorks,
           max_from_search: Number(maxFromSearch) || 12,
           allow_auth: allowAuth,
+          hunt_leaks: huntLeaks,
           max_targets: Number(maxTargets) || 100,
         }),
       });
@@ -247,7 +253,11 @@ export default function LLMHuntPage() {
                 />
               </>
             ) : null}
-            <label className="flex items-center gap-2 text-sm" title="只试每个平台最常见的 2 组默认口令；登录后只读配置，不创建/不修改任何东西">
+            <label className="flex items-center gap-2 text-sm" title="用 Hunter/Quake 找响应体里本来就含 key 的 URL，再取回来；这是拿 key 最短的路径">
+              <Switch checked={huntLeaks} onCheckedChange={setHuntLeaks} size="sm" />
+              先找泄漏的密钥文件
+            </label>
+            <label className="flex items-center gap-2 text-sm" title="只试每个平台最常见的默认口令；登录后只读配置，不创建/不修改任何东西">
               <Switch checked={allowAuth} onCheckedChange={setAllowAuth} size="sm" />
               默认口令探测（POST）
             </label>
@@ -350,7 +360,10 @@ export default function LLMHuntPage() {
                 {ghStatus ? (
                   <span className="text-xs text-muted-foreground">
                     {ghStatus.ready ? (ghStatus.running ? "运行中…" : "就绪") : "未配置 token"}
-                    {ghStatus.found > 0 ? ` · 本轮新增 ${ghStatus.found}` : ""}
+                    {ghStatus.dorks_done ? ` · 检索 ${ghStatus.dorks_done} 条` : ""}
+                    {ghStatus.files_fetched ? ` · 抓取 ${ghStatus.files_fetched} 个文件` : ""}
+                    {ghStatus.found ? ` · 命中 ${ghStatus.found}` : ""}
+                    {ghStatus.last_error ? ` · 错误: ${ghStatus.last_error.slice(0, 60)}` : ""}
                   </span>
                 ) : null}
                 {stats ? (
