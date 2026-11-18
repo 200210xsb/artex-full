@@ -215,7 +215,7 @@ export default function LLMHuntPage() {
   const shown = keys.filter((k) => (!provider || k.key_type === provider) && (!onlyVerified || k.verify_state === "valid"));
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col gap-4">
+    <div className="mx-auto flex min-h-0 w-full max-w-[1440px] flex-1 flex-col gap-4">
       {/* 头部 */}
       <div className="flex flex-wrap items-center gap-2">
         <BrainIcon className="size-5 text-muted-foreground" />
@@ -232,15 +232,18 @@ export default function LLMHuntPage() {
         </Button>
       </div>
 
-      {/* KPI */}
-      <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-        <Kpi label="泄漏密钥" value={stats?.total ?? 0} hint="按指纹去重" />
-        <Kpi label="已确认有效" value={stats?.verified ?? 0} tone={stats?.verified ? "bad" : "muted"} hint="仅 OpenAI / Anthropic 可验证" />
-        <Kpi label="暴露实例" value={assets.length} hint="Ollama / Dify / Flowise …" />
-        <Kpi
-          label="狩猎状态"
-          value={status.running ? "运行中" : last ? "已停止" : "未开始"}
-          hint={last?.note || (last ? `#${last.id} · ${last.status}` : "点「开始狩猎」")}
+      {/* 统计带：宽屏上四张大卡会被拉成空盒子，改成一行紧凑指标 */}
+      <div className="flex flex-wrap items-center gap-x-6 gap-y-2 rounded-lg border bg-card/50 px-4 py-2.5">
+        <Stat label="泄漏密钥" value={stats?.total ?? 0} />
+        <Divider />
+        <Stat label="已确认有效" value={stats?.verified ?? 0} tone={stats?.verified ? "bad" : "muted"} />
+        <Divider />
+        <Stat label="暴露实例" value={assets.length} />
+        <Divider />
+        <Stat
+          label="状态"
+          text={status.running ? "狩猎中" : last ? "已停止" : "未开始"}
+          hint={last?.note || (last ? `#${last.id} · ${last.status}` : "")}
         />
       </div>
 
@@ -455,17 +458,23 @@ export default function LLMHuntPage() {
   );
 }
 
-function Kpi({ label, value, hint, tone }: { label: string; value: React.ReactNode; hint?: string; tone?: "bad" | "muted" }) {
+function Stat({ label, value, text, hint, tone }: {
+  label: string; value?: React.ReactNode; text?: string; hint?: string; tone?: "bad" | "muted";
+}) {
   return (
-    <Card>
-      <CardContent className="py-3">
-        <p className="text-xs text-muted-foreground">{label}</p>
-        <p className={cn("mt-0.5 text-2xl font-semibold tabular-nums",
-          tone === "bad" ? "text-destructive" : tone === "muted" ? "text-muted-foreground" : "")}>{value}</p>
-        {hint ? <p className="mt-0.5 text-[11px] text-muted-foreground">{hint}</p> : null}
-      </CardContent>
-    </Card>
+    <div className="flex min-w-0 items-baseline gap-2">
+      <span className="text-xs text-muted-foreground">{label}</span>
+      <span className={cn("text-base font-semibold tabular-nums",
+        tone === "bad" ? "text-destructive" : tone === "muted" ? "text-muted-foreground" : "")}>
+        {text ?? value}
+      </span>
+      {hint ? <span className="max-w-72 truncate text-[11px] text-muted-foreground" title={hint}>{hint}</span> : null}
+    </div>
   );
+}
+
+function Divider() {
+  return <span className="hidden h-4 w-px bg-border sm:block" />;
 }
 
 function Toggle({ checked, onChange, label, title }: { checked: boolean; onChange: (v: boolean) => void; label: string; title?: string }) {
