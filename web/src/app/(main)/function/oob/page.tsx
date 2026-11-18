@@ -293,7 +293,7 @@ export default function OOBPage() {
   }, [sessions, originFilter, sq]);
 
   return (
-    <div className="mx-auto flex min-h-0 w-full max-w-[1500px] flex-1 flex-col gap-4">
+    <div className="mx-auto flex h-full min-h-0 w-full max-w-[1500px] flex-1 flex-col gap-4 overflow-hidden">
       {/* Header */}
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-2">
@@ -401,9 +401,9 @@ export default function OOBPage() {
           </TabsList>
 
           {/* ---------- 台账：左会话 右命中流 ---------- */}
-          <TabsContent value="ledger" className="mt-0 min-h-0 flex-1">
+          <TabsContent value="ledger" className="mt-0 min-h-0 flex-1 overflow-hidden">
             <div className="grid min-h-0 h-full grid-cols-1 gap-4 lg:grid-cols-[minmax(260px,320px)_1fr]">
-              <Card className="flex min-h-0 flex-col overflow-hidden">
+              <Card className="flex h-full min-h-0 flex-col overflow-hidden">
                 <CardHeader className="gap-2 pb-2">
                   <CardTitle className="flex items-center gap-2 text-sm">
                     会话
@@ -434,7 +434,7 @@ export default function OOBPage() {
                   </div>
                 </CardHeader>
                 <CardContent className="min-h-0 flex-1 p-0">
-                  <ScrollArea className="h-full">
+                  <ScrollArea className="h-full [&>[data-radix-scroll-area-viewport]]:overscroll-contain [&>[data-radix-scroll-area-viewport]]:[scrollbar-width:thin]">
                     {visibleSessions.length === 0 ? (
                       <div className="px-4 py-8 text-center">
                         <p className="text-xs font-medium">还没有会话</p>
@@ -528,7 +528,7 @@ export default function OOBPage() {
                     </div>
                   </CardHeader>
                   <CardContent className="min-h-0 flex-1 p-0">
-                    <ScrollArea className="h-full">
+                    <ScrollArea className="h-full [&>[data-radix-scroll-area-viewport]]:overscroll-contain [&>[data-radix-scroll-area-viewport]]:[scrollbar-width:thin]">
                       {hits.length === 0 ? (
                         <div className="px-4 py-10 text-center">
                           {current?.id === "ext" ? (

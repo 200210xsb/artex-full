@@ -88,7 +88,8 @@ These serve as the fallback; there is no separate default.css file. */
 
   /* fonts */
   --font-sans: var(--font-geist);
-  --font-mono: var(--font-geist-mono);
+  /* 终端/日志统一等宽：优先 JetBrains Mono（未安装则回落到 Geist Mono） */
+  --font-mono: "JetBrains Mono", var(--font-geist-mono), ui-monospace, SFMono-Regular, Menlo, monospace;
   --background: oklch(1 0 0);
   --foreground: oklch(0.145 0 0);
 }
@@ -281,4 +282,24 @@ html {
     print-color-adjust: exact;
     -webkit-print-color-adjust: exact;
   }
+}
+
+/* 内部滚动容器：细滚动条、常显，避免用户不知道这里能滚 */
+.scrollbar-thin {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+.scrollbar-thin::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+.scrollbar-thin::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 4px;
+}
+.scrollbar-thin::-webkit-scrollbar-thumb:hover {
+  background: var(--muted-foreground);
+}
+.scrollbar-thin::-webkit-scrollbar-track {
+  background: transparent;
 }
