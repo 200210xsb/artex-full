@@ -29,9 +29,12 @@ func TestGraphOverviewExposesAssociatedCompanies(t *testing.T) {
 	t.Cleanup(func() { _ = companies.DeleteCompany(companyID) })
 
 	domain := fmt.Sprintf("overview-%d.example", stamp)
+	// IP 资产在全库唯一（uq_av2_ip），写死一个地址会让第二次跑撞上上一轮留下的行，
+	// asset_count 就只剩 1。用 TEST-NET-3 里按时间戳取的地址，每次都是新的。
+	ip := fmt.Sprintf("203.0.113.%d", stamp%254+1)
 	if added, skipped, invalid, errs := companies.AddScopeInputs(companyID, []db.ScopeInput{
 		{Kind: "domain", Value: domain},
-		{Kind: "ip", Value: "203.0.113.7"},
+		{Kind: "ip", Value: ip},
 	}, "overview test"); added != 2 || skipped != 0 || invalid != 0 || len(errs) != 0 {
 		t.Fatalf("seed company scope: added=%d skipped=%d invalid=%d errors=%v", added, skipped, invalid, errs)
 	}
@@ -43,6 +46,12 @@ func TestGraphOverviewExposesAssociatedCompanies(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = d.DeleteTask(task.ID) })
+	// 资产是全局的，公司删掉后行还在；不显式清掉就会污染后面几轮的统计。
+	t.Cleanup(func() {
+		if _, err := d.Exec(`DELETE FROM assets WHERE company_id = $1 OR domain = $2 OR ip = $3`, companyID, domain, ip); err != nil {
+			t.Logf("cleanup assets: %v", err)
+		}
+	})
 
 	tools := NewToolSet(d.Exploration(task.ExplorationID), "planner")
 	tools.SetTaskID(task.ID)
@@ -73,7 +82,7 @@ func TestGraphOverviewExposesAssociatedCompanies(t *testing.T) {
 		t.Errorf("asset_count = %v, want 2 (declared domain + ip materialized as assets)", got)
 	}
 	scope := fmt.Sprint(entry["scope"])
-	for _, want := range []string{"domain:" + domain, "ip:203.0.113.7/32"} {
+	for _, want := range []string{"domain:" + domain, "ip:" + ip + "/32"} {
 		if !strings.Contains(scope, want) {
 			t.Errorf("scope %q missing %q", scope, want)
 		}

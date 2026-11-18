@@ -6,6 +6,7 @@ package llmrec
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"iter"
 	"log"
 	"strings"
@@ -71,18 +72,70 @@ type Recorder struct {
 	// CompletionRequest 上,故 Recorder 需在此单独带一份,序列化时写进录制。
 	thinkingType    string
 	reasoningEffort string
-	enabled         func() bool // reports whether recording is currently on; nil = always record
+	enabled         func() bool   // reports whether recording is currently on; nil = always record
+	limits          func() Limits // caps how much of each body is persisted; nil = DefaultLimits
+}
+
+// Limits caps how much of each recorded body is persisted.
+//
+// The recorded request body is the whole conversation prompt, and it grows with
+// every turn: on a busy day the recorder wrote 32k rows whose TOAST alone
+// reached 45 GB — enough to fill the data disk and take PostgreSQL down with
+// it. Keeping the head of a body is enough to tell which call it was; the
+// metadata (model, tokens, latency, status) is kept in full either way.
+//
+// StoreRaw controls the raw wire bodies. They duplicate the normalized request
+// body (same prompt, same bytes on the wire) and roughly doubled the storage
+// cost, so they are off by default. The UI falls back to the normalized body
+// when they are absent.
+type Limits struct {
+	MaxRequestBytes  int
+	MaxResponseBytes int
+	StoreRaw         bool
+}
+
+// DefaultLimits returns the caps used when no explicit limits are configured.
+func DefaultLimits() Limits {
+	return Limits{
+		MaxRequestBytes:  16 << 10,
+		MaxResponseBytes: 64 << 10,
+		StoreRaw:         false,
+	}
+}
+
+// clipBody truncates s to max bytes and appends a marker saying how much was
+// dropped, so a reader can tell the body was cut rather than sent that way.
+// A cut in the middle of a multi-byte rune would leave invalid UTF-8 in the
+// stored text, so the tail is trimmed back to a rune boundary.
+func clipBody(s string, max int) string {
+	if max <= 0 || len(s) <= max {
+		return s
+	}
+	cut := strings.ToValidUTF8(s[:max], "")
+	return fmt.Sprintf("%s\n…[ARTEX 已截断：原文 %d 字节，仅保留前 %d 字节]", cut, len(s), max)
 }
 
 // Wrap returns a Provider that records calls to pg when enabled() reports true.
 // profName is the LLM profile name (e.g. "default"); may be empty. thinkingType /
 // reasoningEffort are the config-level thinking params actually sent to the API
 // (empty = not sent). A nil enabled predicate records unconditionally.
-func Wrap(inner llm.Provider, pg *db.DB, model, profName, thinkingType, reasoningEffort string, enabled func() bool) *Recorder {
-	return &Recorder{
+func Wrap(inner llm.Provider, pg *db.DB, model, profName, thinkingType, reasoningEffort string, enabled func() bool, limits ...func() Limits) *Recorder {
+	r := &Recorder{
 		inner: inner, pg: pg, model: model, prof: profName,
 		thinkingType: thinkingType, reasoningEffort: reasoningEffort, enabled: enabled,
 	}
+	if len(limits) > 0 {
+		r.limits = limits[0]
+	}
+	return r
+}
+
+// limitsOrDefault returns the configured caps, falling back to the defaults.
+func (r *Recorder) limitsOrDefault() Limits {
+	if r.limits == nil {
+		return DefaultLimits()
+	}
+	return r.limits()
 }
 
 // parseSession extracts task id and worker role from session strings like
@@ -344,6 +397,19 @@ func (r *Recorder) record(req llm.CompletionRequest, session, taskID, worker, re
 		// a call that failed before any HTTP request went out).
 		RawRequest:  capt.RawRequest(),
 		RawResponse: capt.RawResponse(),
+	}
+
+	lim := r.limitsOrDefault()
+	rec.RequestBody = clipBody(rec.RequestBody, lim.MaxRequestBytes)
+	rec.ResponseBody = clipBody(rec.ResponseBody, lim.MaxResponseBytes)
+	if lim.StoreRaw {
+		rec.RawRequest = clipBody(rec.RawRequest, lim.MaxRequestBytes)
+		rec.RawResponse = clipBody(rec.RawResponse, lim.MaxResponseBytes)
+	} else {
+		// The raw wire bodies duplicate the normalized ones; storing both
+		// doubled the table for no extra information.
+		rec.RawRequest = ""
+		rec.RawResponse = ""
 	}
 
 	if err := r.pg.InsertLLMRecord(rec); err != nil {

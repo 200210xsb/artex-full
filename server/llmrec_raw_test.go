@@ -64,7 +64,11 @@ func TestRecorderPersistsRawWireBodies(t *testing.T) {
 		t.Fatalf("NewProvider: %v", err)
 	}
 	const session = "exp999999-rawtest"
-	rec := llmrec.Wrap(inner, pg, cfg.Model, "raw-test-profile", "", "", func() bool { return true })
+	// 原文默认不存（与归一化正文重复，体积翻倍），要存得显式打开。
+	rec := llmrec.Wrap(inner, pg, cfg.Model, "raw-test-profile", "", "", func() bool { return true },
+		func() llmrec.Limits {
+			return llmrec.Limits{MaxRequestBytes: 1 << 20, MaxResponseBytes: 1 << 20, StoreRaw: true}
+		})
 
 	// Clean up whatever this test writes, whether or not it passes. Must be a
 	// defer registered after `defer m.Close()` (LIFO puts it first) — a

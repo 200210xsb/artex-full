@@ -351,3 +351,35 @@ func nullIfEmpty(s string) any {
 	}
 	return s
 }
+
+// PruneLLMRecords deletes call records older than cutoff and returns the number
+// of rows removed. The LLM call log grows with every prompt — without a
+// retention window it eventually fills the data disk.
+func (d *DB) PruneLLMRecords(cutoff time.Time) (int64, error) {
+	res, err := d.Exec(`DELETE FROM llm_records WHERE ts < $1`, cutoff)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+// LLMRecordsSize reports how much disk llm_records occupies (heap + indexes +
+// TOAST). Pruned rows do not give their space back on their own: DELETE only
+// marks the tuples dead, so the file keeps its high-water mark until a VACUUM
+// rewrites it.
+func (d *DB) LLMRecordsSize() (int64, error) {
+	var n int64
+	if err := d.QueryRow(`SELECT pg_total_relation_size('llm_records')`).Scan(&n); err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
+// VacuumLLMRecords rewrites llm_records so the space of pruned rows goes back
+// to the filesystem. VACUUM FULL takes an exclusive lock on the table, so it
+// only runs when the table is big enough to be worth it and the disk has the
+// temporary room.
+func (d *DB) VacuumLLMRecords() error {
+	_, err := d.Exec(`VACUUM FULL llm_records`)
+	return err
+}

@@ -52,7 +52,7 @@ func TestParseSessionFallbackIsExplorationScoped(t *testing.T) {
 }
 
 func TestCompleteForwardsAtomicResponse(t *testing.T) {
-	recorder := Wrap(completeProvider{}, nil, "model", "profile", "", "", func() bool { return false })
+	recorder := Wrap(completeProvider{}, nil, "model", "profile", "", "", func() bool { return false }, nil)
 	msg, stopReason, usage, err := recorder.Complete(context.Background(), llm.CompletionRequest{})
 	if err != nil {
 		t.Fatalf("Complete() error: %v", err)
@@ -95,7 +95,7 @@ func TestSideUsageRecordedOnceOnConsumerCancellation(t *testing.T) {
 	for _, early := range []bool{false, true} {
 		profile := "btw-metering-" + uuid.NewString()
 		ctx, cancel := context.WithCancel(transcript.WithSessionID(t.Context(), "exp0-btw-test"))
-		recorder := Wrap(meteredStreamProvider{}, pg, "fixture", profile, "", "", func() bool { return false })
+		recorder := Wrap(meteredStreamProvider{}, pg, "fixture", profile, "", "", func() bool { return false }, nil)
 		for event, err := range recorder.Stream(ctx, llm.CompletionRequest{}) {
 			if err != nil {
 				t.Fatal(err)

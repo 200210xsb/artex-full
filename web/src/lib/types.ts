@@ -935,6 +935,11 @@ export interface Settings {
   traffic_capture: boolean;
   agent_traffic_binding: boolean; // Agent 自动绑定流量证据，默认关闭；不影响人工绑定
   llm_record: boolean; // LLM 录制开关（默认关）；关闭时不记录任何 LLM 调用
+  // LLM 调用记录的存储策略。整段 prompt 进库会长得很快（曾经 45GB 把数据盘写满），
+  // 所以正文有上限、超期自动清理，原文默认不存。
+  llm_record_max_body_kb: number; // 单条正文保留上限 KB（0=不截断）
+  llm_record_store_raw: boolean; // 是否额外存原始 HTTP 报文（与归一化正文重复，默认关）
+  llm_records_retention_days: number; // 调用记录保留天数（0=永久保留）
   // Web search. brave_key_set / tavily_key_set reflect whether a key is stored
   // (the values are never returned). On PUT, send the corresponding field to set/clear.
   web_search_enabled: boolean;

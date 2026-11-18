@@ -11,6 +11,7 @@ import {
   Trash2Icon,
   CopyIcon,
   CheckIcon,
+  SlidersHorizontalIcon,
 } from "lucide-react";
 
 import {
@@ -29,6 +30,8 @@ import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { Label } from "@/components/ui/label";
 import {
   Table,
   TableBody,
@@ -135,6 +138,15 @@ export default function LLMRecordsPage() {
   const [recEnabled, setRecEnabled] = React.useState(false);
   const [recBusy, setRecBusy] = React.useState(false);
 
+  // 存储策略：正文上限、保留天数、是否存原始报文。录制器每次调用都读这些值，
+  // 改完立即生效。
+  const [storageOpen, setStorageOpen] = React.useState(false);
+  const [maxBodyKB, setMaxBodyKB] = React.useState(16);
+  const [retentionDays, setRetentionDays] = React.useState(3);
+  const [storeRaw, setStoreRaw] = React.useState(false);
+  const [storageBusy, setStorageBusy] = React.useState(false);
+  const [storageError, setStorageError] = React.useState("");
+
   // Inline detail panel (Burp-style split, not a dialog)
   const [selected, setSelected] = React.useState<LLMRecordItem | null>(null);
   const [detail, setDetail] = React.useState<LLMRecordDetail | null>(null);
@@ -167,7 +179,13 @@ export default function LLMRecordsPage() {
     let alive = true;
     api
       .settings()
-      .then((s) => { if (alive) setRecEnabled(!!s.llm_record); })
+      .then((s) => {
+        if (!alive) return;
+        setRecEnabled(!!s.llm_record);
+        setMaxBodyKB(s.llm_record_max_body_kb ?? 16);
+        setRetentionDays(s.llm_records_retention_days ?? 3);
+        setStoreRaw(!!s.llm_record_store_raw);
+      })
       .catch(() => {});
     return () => { alive = false; };
   }, []);
@@ -182,6 +200,26 @@ export default function LLMRecordsPage() {
       setRecEnabled(!on); // revert on failure
     } finally {
       setRecBusy(false);
+    }
+  };
+
+  const saveStorage = async () => {
+    setStorageBusy(true);
+    setStorageError("");
+    try {
+      const s = await api.setSettings({
+        llm_record_max_body_kb: Math.max(0, Number(maxBodyKB) || 0),
+        llm_records_retention_days: Math.max(0, Number(retentionDays) || 0),
+        llm_record_store_raw: storeRaw,
+      });
+      setMaxBodyKB(s.llm_record_max_body_kb ?? 0);
+      setRetentionDays(s.llm_records_retention_days ?? 0);
+      setStoreRaw(!!s.llm_record_store_raw);
+      setStorageOpen(false);
+    } catch {
+      setStorageError("保存失败，请重试");
+    } finally {
+      setStorageBusy(false);
     }
   };
 
@@ -344,6 +382,66 @@ export default function LLMRecordsPage() {
             {recEnabled ? "录制中" : "已关闭"}
           </label>
         </div>
+
+        {/* 存储策略：正文上限 / 保留天数 / 是否存原文 */}
+        <Popover open={storageOpen} onOpenChange={setStorageOpen}>
+          <PopoverTrigger asChild>
+            <Button variant="outline" size="sm" className="h-8" title="录制存储策略">
+              <SlidersHorizontalIcon className="size-3.5" />
+              存储策略
+            </Button>
+          </PopoverTrigger>
+          <PopoverContent align="end" className="w-72 space-y-3">
+            <div className="space-y-1.5">
+              <Label htmlFor="llm-max-body" className="text-xs">单条正文上限（KB）</Label>
+              <Input
+                id="llm-max-body"
+                type="number"
+                min={0}
+                className="h-8"
+                value={maxBodyKB}
+                onChange={(e) => setMaxBodyKB(Number(e.target.value))}
+              />
+              <p className="text-[11px] text-muted-foreground">
+                超出部分会被截断并标注。0 = 不截断（磁盘会被写满）。
+              </p>
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="llm-retention" className="text-xs">保留天数</Label>
+              <Input
+                id="llm-retention"
+                type="number"
+                min={0}
+                className="h-8"
+                value={retentionDays}
+                onChange={(e) => setRetentionDays(Number(e.target.value))}
+              />
+              <p className="text-[11px] text-muted-foreground">
+                超期的调用记录会被后台清理。0 = 永久保留。
+              </p>
+            </div>
+            <div className="flex items-center gap-2">
+              <Switch
+                id="llm-store-raw"
+                size="sm"
+                checked={storeRaw}
+                onCheckedChange={setStoreRaw}
+              />
+              <Label htmlFor="llm-store-raw" className="text-xs cursor-pointer">
+                额外存原始 HTTP 报文
+              </Label>
+            </div>
+            <p className="text-[11px] text-muted-foreground">
+              原文与归一化正文重复，存储体积约翻倍，默认不存。
+            </p>
+            {storageError ? (
+              <p className="text-[11px] text-destructive">{storageError}</p>
+            ) : null}
+            <Button size="sm" className="w-full" disabled={storageBusy} onClick={saveStorage}>
+              {storageBusy ? "保存中…" : "保存"}
+            </Button>
+          </PopoverContent>
+        </Popover>
 
         <div className="ml-auto flex items-center gap-2 text-xs text-muted-foreground">
           <span className="tabular-nums">

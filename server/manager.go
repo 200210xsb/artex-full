@@ -19,6 +19,7 @@ import (
 	"github.com/Autumn-27/artex/enrich"
 	"github.com/Autumn-27/artex/guard"
 	"github.com/Autumn-27/artex/intercept"
+	"github.com/Autumn-27/artex/llmrec"
 	"github.com/Autumn-27/artex/traffic"
 	actool "github.com/Autumn-27/norma/tool"
 )
@@ -56,20 +57,20 @@ type Task struct {
 	CompanyIDs         []int64 `json:"company_ids,omitempty"`
 	Status             string  `json:"status"` // persisted lifecycle status (done/failed/timeout 为终态；空/其它则由运行态推导)
 	// 任务级超时(见 docs/任务级超时与收尾设计.md)。DeadlineAt/FirstRunAt 为 unix 秒,0=未设/未运行。
-	TimeoutSeconds       int                    `json:"timeout_seconds"`
-	PlanHeartbeatSeconds int                    `json:"plan_heartbeat_seconds"` // planner 心跳触发间隔(秒)
-	CoverageEnabled      bool                   `json:"coverage_enabled"`       // 资产覆盖度功能开关(创建时定,默认开)
+	TimeoutSeconds       int  `json:"timeout_seconds"`
+	PlanHeartbeatSeconds int  `json:"plan_heartbeat_seconds"` // planner 心跳触发间隔(秒)
+	CoverageEnabled      bool `json:"coverage_enabled"`       // 资产覆盖度功能开关(创建时定,默认开)
 	// AgentKey 是本任务绑定的【专项 agent】(agents.key)。空=不绑定,任务继续用系统内置
 	// agent 集(与引入本特性之前完全一致);非空=该 agent 的当前提示词会作为
 	// 「本次任务专项指引」追加到本任务的 planner/worker/main 系统提示词末尾。
-	AgentKey            string                  `json:"agent_key,omitempty"`
-	FirstRunAt          int64                  `json:"first_run_at,omitempty"`
-	DeadlineAt          int64                  `json:"deadline_at,omitempty"`
-	Store                *pgdb.ExplorationStore `json:"-"`
-	Guard                *guard.Guard           `json:"-"`
-	notify               chan struct{}
-	lifecycleMu          sync.RWMutex
-	llmMu                sync.RWMutex
+	AgentKey    string                 `json:"agent_key,omitempty"`
+	FirstRunAt  int64                  `json:"first_run_at,omitempty"`
+	DeadlineAt  int64                  `json:"deadline_at,omitempty"`
+	Store       *pgdb.ExplorationStore `json:"-"`
+	Guard       *guard.Guard           `json:"-"`
+	notify      chan struct{}
+	lifecycleMu sync.RWMutex
+	llmMu       sync.RWMutex
 	// goalMu 保护 Goal：任务目标会被人工/脚本改（模版纠错、目标重写），
 	// planner 每轮都要读到最新值，所以它不是创建时的一次性快照。
 	goalMu sync.RWMutex
@@ -274,12 +275,15 @@ type Manager struct {
 	// taskStateMu preserves commit order between PostgreSQL lifecycle writes and
 	// their in-memory mirrors. lifecycleMu makes snapshots race-free, but without
 	// this outer write lock an older request could commit first and publish last.
-	taskStateMu sync.Mutex
-	mu          sync.RWMutex
-	tasks       map[string]*Task
-	active      string
-	trafficOn   bool // 流量捕获开关（默认关；settings.traffic_capture）
-	llmRecOn    bool // LLM 录制开关（默认关；settings.llm_record）
+	taskStateMu     sync.Mutex
+	mu              sync.RWMutex
+	tasks           map[string]*Task
+	active          string
+	trafficOn       bool // 流量捕获开关（默认关；settings.traffic_capture）
+	llmRecOn        bool // LLM 录制开关（默认关；settings.llm_record）
+	llmRecStoreRaw  bool // 是否额外存原始报文（默认关；settings.llm_record_store_raw）
+	llmRecRetention int  // 调用记录保留天数（默认 3；0=永久保留；settings.llm_records_retention_days）
+	llmRecMaxBodyKB int  // 单条正文保留上限 KB（默认 16；settings.llm_record_max_body_kb）
 	// 联网搜索开关与来源（默认关；settings.web_search_*）。brave-free 需要 braveKey；tavily 需要 tavilyKey。
 	// webSearchProxy 是独立出口代理(http/https/socks5)，与记录流量的 MITM 代理无关。
 	webSearchOn      bool
@@ -314,8 +318,13 @@ const (
 	//   proxy  —— 强制经全局出口，例如必须隐藏源 IP、或只有出口才连得上的目标
 	settingTrafficEgressDirect = "traffic_egress_direct"
 	settingTrafficEgressProxy  = "traffic_egress_proxy"
-	settingWorkers     = "workers"
-	settingLLMRecord   = "llm_record"
+	settingWorkers             = "workers"
+	settingLLMRecord           = "llm_record"
+	// LLM 调用记录的存储策略。录制器每次调用都写一行（含完整 prompt），一天就能
+	// 写进几十 GB；这三个设置一起把这条曲线压平。
+	settingLLMRecordStoreRaw   = "llm_record_store_raw"       // 是否额外存原始报文（默认关）
+	settingLLMRecordsRetention = "llm_records_retention_days" // 保留天数（默认 3，0=永久保留）
+	settingLLMRecordMaxBodyKB  = "llm_record_max_body_kb"     // 单条正文保留上限 KB（默认 16）
 	// LLM 轮询(故障转移)。默认关闭——开启后走「全局激活配置」的 agent 在当前配置
 	// 不可用(余额不足/key 失效/限流/服务异常)时自动切到下一个配置。
 	// settingLLMPoolBindFallback 仅在轮询开启时有意义:默认关闭,即 agent/任务显式
@@ -466,6 +475,9 @@ func NewManager(dir, proxyAddr string) (*Manager, error) {
 	m.trafficOn = pg.GetBool(settingTrafficCapture, false)
 	// LLM 录制开关（默认关）。录制器每次调用时读取此标志。
 	m.llmRecOn = pg.GetBool(settingLLMRecord, false)
+	m.llmRecStoreRaw = pg.GetBool(settingLLMRecordStoreRaw, false)
+	m.llmRecRetention = pg.GetInt(settingLLMRecordsRetention, defaultLLMRecordsRetentionDays)
+	m.llmRecMaxBodyKB = pg.GetInt(settingLLMRecordMaxBodyKB, defaultLLMRecordMaxBodyKB)
 	// Load persisted web-search config (default: off, ddgs).
 	m.webSearchOn = pg.GetBool(settingWebSearchOn, false)
 	if v, ok, _ := pg.GetSetting(settingWebSearchBackend); ok && v != "" {
@@ -545,6 +557,83 @@ func (m *Manager) SetLLMRecordEnabled(on bool) error {
 	}
 	m.mu.Lock()
 	m.llmRecOn = on
+	m.mu.Unlock()
+	return nil
+}
+
+// LLMRecordStoreRaw reports whether the raw wire bodies are stored next to the
+// normalized ones (默认关；settings.llm_record_store_raw).
+func (m *Manager) LLMRecordStoreRaw() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.llmRecStoreRaw
+}
+
+// LLMRecordsRetentionDays reports how many days of call records to keep
+// (0 = keep forever). Swept by the background maintenance job.
+func (m *Manager) LLMRecordsRetentionDays() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.llmRecRetention
+}
+
+// LLMRecordMaxBodyKB reports the per-body storage cap in KB (0 = no cap).
+func (m *Manager) LLMRecordMaxBodyKB() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.llmRecMaxBodyKB
+}
+
+// LLMRecordLimits returns the caps the recorder applies to every stored body.
+// The recorder reads them per call, so a change takes effect immediately.
+func (m *Manager) LLMRecordLimits() llmrec.Limits {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	lim := llmrec.DefaultLimits()
+	if m.llmRecMaxBodyKB > 0 {
+		lim.MaxRequestBytes = m.llmRecMaxBodyKB * 1024
+		lim.MaxResponseBytes = m.llmRecMaxBodyKB * 4 * 1024
+	}
+	lim.StoreRaw = m.llmRecStoreRaw
+	return lim
+}
+
+// SetLLMRecordStoreRaw persists the raw-body toggle. Effective at once — the
+// recorder reads the limits on every call.
+func (m *Manager) SetLLMRecordStoreRaw(on bool) error {
+	if err := m.pg.SetBool(settingLLMRecordStoreRaw, on); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	m.llmRecStoreRaw = on
+	m.mu.Unlock()
+	return nil
+}
+
+// SetLLMRecordsRetentionDays persists the retention window (0 = keep forever).
+func (m *Manager) SetLLMRecordsRetentionDays(days int) error {
+	if days < 0 {
+		days = 0
+	}
+	if err := m.pg.SetInt(settingLLMRecordsRetention, days); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	m.llmRecRetention = days
+	m.mu.Unlock()
+	return nil
+}
+
+// SetLLMRecordMaxBodyKB persists the per-body cap (0 = no cap).
+func (m *Manager) SetLLMRecordMaxBodyKB(kb int) error {
+	if kb < 0 {
+		kb = 0
+	}
+	if err := m.pg.SetInt(settingLLMRecordMaxBodyKB, kb); err != nil {
+		return err
+	}
+	m.mu.Lock()
+	m.llmRecMaxBodyKB = kb
 	m.mu.Unlock()
 	return nil
 }
