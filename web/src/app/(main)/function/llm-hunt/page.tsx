@@ -1,12 +1,16 @@
 "use client";
 
-// 大模型资产与密钥测绘。
+// 大模型测绘 / 密钥狩猎。
 //
-// 数据来源三条：粘贴清单、资产库、空间测绘/搜索引擎发现。所有探测都是只读 GET，
-// 且引擎里写死了每主机上限；这里只负责展示与触发。
+// 三条取 key 的路，按产出排序：① 找"响应体里已含 key"的 URL（Hunter/Quake）
+// ② 目标自身的 JS bundle 与未授权配置接口 ③ 公开仓库（产出低，会被厂商吊销）。
+// 所有探测只读；自动验证默认关闭，开启后仅对每条新 key 发一次免费只读请求。
 
 import * as React from "react";
-import { BrainIcon, Loader2Icon, PlayIcon, RefreshCwIcon, SearchIcon, SquareIcon, Trash2Icon } from "lucide-react";
+import {
+  BrainIcon, CopyIcon, Loader2Icon, PlayIcon, RefreshCwIcon, SearchIcon,
+  ShieldCheckIcon, SquareIcon, Trash2Icon,
+} from "lucide-react";
 import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
@@ -18,135 +22,85 @@ import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
+  Table, TableBody, TableCell, TableHead, TableHeader, TableRow,
 } from "@/components/ui/table";
+import { cn } from "@/lib/utils";
 
 type Asset = {
-  id: number;
-  url: string;
-  host: string;
-  port: number;
-  vendor: string;
-  version: string;
-  unauth: boolean;
-  models: string[] | null;
-  evidence: string;
-  source: string;
-  last_seen: string;
+  id: number; url: string; vendor: string; version: string;
+  unauth: boolean; models: string[] | null; source: string; evidence: string;
 };
 type LeakKey = {
-  id: number;
-  key_type: string;
-  masked: string;
-  url: string;
-  found_at: string;
-  source_kind?: string;
-  repo?: string;
-  verify_state?: string;
-  verify_note?: string;
+  id: number; key_type: string; masked: string; url: string; found_at: string;
+  source_kind?: string; repo?: string; verify_state?: string; verify_note?: string;
 };
-type ScanStatus = {
-  running: boolean;
-  last: { id: number; status: string; total: number; done: number; assets: number; keys: number } | null;
+type ScanStatus = { running: boolean; last: { id: number; status: string; total: number; done: number; keys: number } | null };
+type KeyStats = { by_provider: Record<string, number>; by_source: Record<string, number>; total: number; verified: number };
+type GHStatus = { ready: boolean; running: boolean; found: number; dorks_done?: number; files_fetched?: number; last_error?: string };
+
+const VERIFY_LABEL: Record<string, { text: string; cls: string }> = {
+  valid: { text: "有效", cls: "bg-destructive/15 text-destructive border-destructive/30" },
+  invalid: { text: "无效", cls: "text-muted-foreground" },
+  unsupported: { text: "不验证", cls: "text-muted-foreground" },
+  error: { text: "不确定", cls: "text-amber-600 dark:text-amber-400" },
+  "": { text: "未验证", cls: "text-muted-foreground" },
+};
+
+const SOURCE_LABEL: Record<string, string> = {
+  "leak-url": "泄漏页面",
+  "leak-js": "泄漏页面 JS",
+  github: "公开仓库",
+  target: "目标接口",
+  "target-js": "目标 JS",
 };
 
 export default function LLMHuntPage() {
-  const [seeds, setSeeds] = React.useState("");
-  const [fromAssets, setFromAssets] = React.useState(false);
-  const [useSearch, setUseSearch] = React.useState(true);
-  const [dorks, setDorks] = React.useState("");
-  const [maxTargets, setMaxTargets] = React.useState("100");
-  const [maxFromSearch, setMaxFromSearch] = React.useState("12");
-  // 默认口令探测是唯一会发 POST 的动作，默认关闭。
-  const [allowAuth, setAllowAuth] = React.useState(false);
-  // 泄漏文件狩猎：直接找"响应体里已含 key"的 URL（Hunter/Quake），是拿 key 最短的路径。
-  const [huntLeaks, setHuntLeaks] = React.useState(true);
-
   const [status, setStatus] = React.useState<ScanStatus>({ running: false, last: null });
+  const [stats, setStats] = React.useState<KeyStats | null>(null);
   const [assets, setAssets] = React.useState<Asset[]>([]);
   const [keys, setKeys] = React.useState<LeakKey[]>([]);
+  const [gh, setGh] = React.useState<GHStatus | null>(null);
+
+  const [repeat, setRepeat] = React.useState(true);
+  const [autoVerify, setAutoVerify] = React.useState(false);
+  const [huntLeaks, setHuntLeaks] = React.useState(true);
+  const [useSearch, setUseSearch] = React.useState(false);
+  const [fromAssets, setFromAssets] = React.useState(false);
+  const [allowAuth, setAllowAuth] = React.useState(false);
+  const [seeds, setSeeds] = React.useState("");
+  const [showAdvanced, setShowAdvanced] = React.useState(false);
   const [busy, setBusy] = React.useState(false);
+
+  const [provider, setProvider] = React.useState<string>("");
+  const [onlyVerified, setOnlyVerified] = React.useState(false);
   const [revealed, setRevealed] = React.useState<Record<number, string>>({});
-  // 密钥狩猎（GitHub 公开仓库）与统计
-  const [ghStatus, setGhStatus] = React.useState<{
-    ready: boolean; running: boolean; found: number;
-    dorks_done?: number; files_fetched?: number; last_error?: string;
-  } | null>(null);
-  const [stats, setStats] = React.useState<{ by_provider: Record<string, number>; by_source: Record<string, number>; total: number } | null>(null);
+  const [copied, setCopied] = React.useState<number | null>(null);
 
   const load = React.useCallback(() => {
     api<ScanStatus>("/api/llmhunt/status").then(setStatus).catch(() => {});
+    api<KeyStats>("/api/llmhunt/key-stats").then(setStats).catch(() => {});
     api<{ assets: Asset[] }>("/api/llmhunt/assets").then((r) => setAssets(r.assets ?? [])).catch(() => {});
     api<{ keys: LeakKey[] }>("/api/llmhunt/keys").then((r) => setKeys(r.keys ?? [])).catch(() => {});
-    api<typeof ghStatus>("/api/llmhunt/keyhunt/status").then(setGhStatus).catch(() => {});
-    api<typeof stats>("/api/llmhunt/key-stats").then(setStats).catch(() => {});
+    api<GHStatus>("/api/llmhunt/keyhunt/status").then(setGh).catch(() => {});
   }, []);
 
   React.useEffect(() => {
     load();
-    const t = setInterval(() => {
-      api<ScanStatus>("/api/llmhunt/status")
-        .then((s) => {
-          setStatus(s);
-          if (s.running) {
-            api<{ assets: Asset[] }>("/api/llmhunt/assets").then((r) => setAssets(r.assets ?? [])).catch(() => {});
-          }
-        })
-        .catch(() => {});
-    }, 4000);
+    const t = setInterval(load, 5000);
     return () => clearInterval(t);
   }, [load]);
 
-  const verifyKeys = async () => {
-    if (!confirm("验证会用这些密钥向厂商发起一次只读请求（仅列模型，不推理、不重试）。只应在你有权验证的密钥上使用。继续？")) return;
-    try {
-      const r = await api<{ tried: number; valid: number }>("/api/llmhunt/keys/verify", {
-        method: "POST",
-        body: JSON.stringify({ confirm: true, limit: 20 }),
-      });
-      toast.success(`已验证 ${r.tried} 条，其中有效 ${r.valid} 条`);
-      load();
-    } catch (e) {
-      toast.error("验证失败：" + (e as Error).message);
-    }
-  };
-
-  const startGH = async () => {
-    try {
-      await api("/api/llmhunt/keyhunt/start", { method: "POST", body: "{}" });
-      toast.success("已开始 GitHub 密钥狩猎（公开仓库，只登记不验证）");
-      load();
-    } catch (e) {
-      toast.error("启动失败：" + (e as Error).message);
-    }
-  };
-
-  const start = async () => {
-    if (!seeds.trim() && !fromAssets && !useSearch) {
-      toast.error("请粘贴目标、勾选资产库，或勾选搜索引擎发现");
-      return;
-    }
+  const startHunt = async () => {
     setBusy(true);
     try {
-      const r = await api<{ scan_id: number }>("/api/llmhunt/scan", {
+      await api("/api/llmhunt/scan", {
         method: "POST",
         body: JSON.stringify({
-          seeds,
-          from_assets: fromAssets,
-          use_search: useSearch,
-          dorks,
-          max_from_search: Number(maxFromSearch) || 12,
-          allow_auth: allowAuth,
-          hunt_leaks: huntLeaks,
-          max_targets: Number(maxTargets) || 100,
+          seeds, from_assets: fromAssets, use_search: useSearch, hunt_leaks: huntLeaks,
+          allow_auth: allowAuth, repeat, repeat_minutes: 5, auto_verify: autoVerify,
         }),
       });
-      toast.success(`已开始（scan #${r.scan_id}）`);
+      toast.success(repeat ? "已开始持续狩猎（每 5 分钟一轮）" : "已开始狩猎");
       load();
     } catch (e) {
       toast.error("启动失败：" + (e as Error).message);
@@ -158,20 +112,53 @@ export default function LLMHuntPage() {
   const stop = async () => {
     try {
       await api("/api/llmhunt/stop", { method: "POST", body: "{}" });
-      toast.success("已请求停止");
+      toast.success("已停止");
+      load();
     } catch (e) {
       toast.error("停止失败：" + (e as Error).message);
     }
   };
 
-  const reveal = async (id: number) => {
-    if (!confirm("这会向服务端取一次密钥明文，15 秒后自动隐藏。确认已获授权？")) return;
+  const startGH = async () => {
     try {
-      const r = await api<{ raw: string }>(`/api/llmhunt/keys/${id}/reveal`);
-      setRevealed((p) => ({ ...p, [id]: r.raw }));
-      setTimeout(() => setRevealed((p) => { const n = { ...p }; delete n[id]; return n; }), 15000);
+      await api("/api/llmhunt/keyhunt/start", { method: "POST", body: "{}" });
+      toast.success("已开始 GitHub 公开仓库狩猎");
+    } catch (e) {
+      toast.error("启动失败：" + (e as Error).message);
+    }
+  };
+
+  const verifyPending = async () => {
+    if (!confirm("自动验证会用每条密钥向厂商发一次免费只读请求（仅列模型，不推理、不重试）。只应在你有权验证的密钥上使用。继续？")) return;
+    try {
+      const r = await api<{ tried: number; valid: number }>("/api/llmhunt/keys/verify", {
+        method: "POST", body: JSON.stringify({ confirm: true, limit: 10 }),
+      });
+      toast.success(`验证 ${r.tried} 条，有效 ${r.valid} 条`);
+      load();
+    } catch (e) {
+      toast.error("验证失败：" + (e as Error).message);
+    }
+  };
+
+  const reveal = async (k: LeakKey) => {
+    if (!confirm("这会向服务端取一次明文，15 秒后自动隐藏。确认你已获授权？")) return;
+    try {
+      const r = await api<{ raw: string }>(`/api/llmhunt/keys/${k.id}/reveal`);
+      setRevealed((p) => ({ ...p, [k.id]: r.raw }));
+      setTimeout(() => setRevealed((p) => { const n = { ...p }; delete n[k.id]; return n; }), 15000);
     } catch (e) {
       toast.error("取原文失败：" + (e as Error).message);
+    }
+  };
+
+  const copyMasked = async (k: LeakKey) => {
+    try {
+      await navigator.clipboard.writeText(k.masked);
+      setCopied(k.id);
+      setTimeout(() => setCopied(null), 1500);
+    } catch {
+      toast.error("复制失败");
     }
   };
 
@@ -186,116 +173,187 @@ export default function LLMHuntPage() {
   };
 
   const last = status.last;
+  const providers = Object.entries(stats?.by_provider ?? {}).sort((a, b) => b[1] - a[1]);
+  const shown = keys.filter((k) => (!provider || k.key_type === provider) && (!onlyVerified || k.verify_state === "valid"));
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col gap-4">
-      <div className="flex items-center gap-2">
+    <div className="flex min-h-0 flex-1 flex-col gap-4 p-1">
+      {/* 头部 */}
+      <div className="flex flex-wrap items-center gap-2">
         <BrainIcon className="size-5 text-muted-foreground" />
-        <h1 className="text-xl font-semibold tracking-tight">大模型测绘</h1>
+        <h1 className="text-xl font-semibold tracking-tight">大模型测绘 · 密钥狩猎</h1>
         {status.running ? (
           <Badge variant="secondary" className="gap-1">
-            <Loader2Icon className="size-3 animate-spin" /> 扫描中
+            <Loader2Icon className="size-3 animate-spin" /> 狩猎中
           </Badge>
-        ) : null}
+        ) : (
+          <Badge variant="outline">空闲</Badge>
+        )}
         <Button variant="ghost" size="sm" className="ml-auto" onClick={load}>
           <RefreshCwIcon className="size-3.5" /> 刷新
         </Button>
       </div>
 
-      <p className="text-sm text-muted-foreground">
-        找暴露的大模型服务（Ollama / vLLM / SGLang / Xinference / Dify / Langflow / Flowise / LibreChat / FastGPT / RAGFlow…），
-        判定未授权能力，并在目标自身响应里识别泄露的密钥。全部只读 GET：同一主机串行、间隔 ≥1.2 秒、每台最多 8 个请求、
-        命中 403/418/429 立即放弃。
-      </p>
+      {/* KPI */}
+      <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+        <Kpi label="泄漏密钥" value={stats?.total ?? 0} hint="按指纹去重" />
+        <Kpi label="已确认有效" value={stats?.verified ?? 0} tone={stats?.verified ? "bad" : "muted"} hint="仅 OpenAI / Anthropic 可验证" />
+        <Kpi label="暴露实例" value={assets.length} hint="Ollama / Dify / Flowise …" />
+        <Kpi
+          label="本轮"
+          value={last ? `${last.done}/${last.total}` : "—"}
+          hint={last ? last.status : "尚未开始"}
+        />
+      </div>
 
+      {/* 控制台 */}
       <Card>
-        <CardHeader>
-          <CardTitle className="text-base">扫描目标</CardTitle>
+        <CardHeader className="pb-3">
+          <CardTitle className="text-base">狩猎控制</CardTitle>
           <CardDescription>
-            三个来源可任意组合。空间测绘优先使用 Subfinder 配置里的 FOFA/Quake/Shodan/Hunter key；没有则回落到搜索引擎 dork。
+            默认走最短路径：让空间测绘告诉我们哪些 URL 的响应体里已经含 key，再取回来。
+            全部只读；同一主机串行，命中 403/418/429 立即放弃该主机。
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
-          <div className="space-y-1.5">
-            <Label htmlFor="hunt-seeds" className="text-xs">目标清单（每行 host / host:端口 / URL）</Label>
-            <Textarea
-              id="hunt-seeds"
-              value={seeds}
-              onChange={(e) => setSeeds(e.target.value)}
-              placeholder={"10.0.0.5:11434\nllm.example.com"}
-              className="min-h-20 font-mono text-xs"
-            />
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+            <Toggle checked={huntLeaks} onChange={setHuntLeaks} label="找泄漏的密钥文件" title="Hunter/Quake 查响应体已含 key 的 URL" />
+            <Toggle checked={repeat} onChange={setRepeat} label="持续狩猎" title="每 5 分钟一轮，直到手动停止" />
+            <Toggle checked={autoVerify} onChange={setAutoVerify} label="自动验证" title="每轮对新增 key 各发一次免费只读请求（仅列模型），上限 10 条" />
+            <Toggle checked={useSearch} onChange={setUseSearch} label="搜索引擎发现" />
+            <Toggle checked={fromAssets} onChange={setFromAssets} label="扫资产库" />
+            <Toggle checked={allowAuth} onChange={setAllowAuth} label="默认口令探测" title="每平台最多试 8 组默认口令，遇锁定即停" />
           </div>
 
-          <div className="flex flex-wrap items-center gap-4">
-            <label className="flex items-center gap-2 text-sm">
-              <Switch checked={fromAssets} onCheckedChange={setFromAssets} size="sm" />
-              从资产库扫描
-            </label>
-            <label className="flex items-center gap-2 text-sm">
-              <Switch checked={useSearch} onCheckedChange={setUseSearch} size="sm" />
-              用搜索引擎 / 空间测绘发现
-            </label>
-            <span className="text-xs text-muted-foreground">最多</span>
-            <Input
-              className="h-8 w-20"
-              value={maxTargets}
-              onChange={(e) => setMaxTargets(e.target.value)}
-            />
-            <span className="text-xs text-muted-foreground">目标</span>
-            {useSearch ? (
-              <>
-                <span className="text-xs text-muted-foreground">发现上限</span>
-                <Input
-                  className="h-8 w-20"
-                  value={maxFromSearch}
-                  onChange={(e) => setMaxFromSearch(e.target.value)}
-                />
-              </>
-            ) : null}
-            <label className="flex items-center gap-2 text-sm" title="用 Hunter/Quake 找响应体里本来就含 key 的 URL，再取回来；这是拿 key 最短的路径">
-              <Switch checked={huntLeaks} onCheckedChange={setHuntLeaks} size="sm" />
-              先找泄漏的密钥文件
-            </label>
-            <label className="flex items-center gap-2 text-sm" title="只试每个平台最常见的默认口令；登录后只读配置，不创建/不修改任何东西">
-              <Switch checked={allowAuth} onCheckedChange={setAllowAuth} size="sm" />
-              默认口令探测（POST）
-            </label>
-            <Button onClick={start} disabled={busy || status.running}>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button onClick={startHunt} disabled={busy || status.running}>
               {busy ? <Loader2Icon className="size-3.5 animate-spin" /> : <PlayIcon className="size-3.5" />}
-              开始测绘
+              开始狩猎
             </Button>
             <Button variant="outline" onClick={stop} disabled={!status.running}>
               <SquareIcon className="size-3.5" /> 停止
             </Button>
+            <Button variant="outline" onClick={startGH} disabled={!gh?.ready || gh?.running} title="公开仓库产出低：GitHub 会与厂商联动吊销泄漏的 key">
+              公开仓库狩猎
+            </Button>
+            <Button variant="ghost" onClick={() => setShowAdvanced((v) => !v)}>
+              {showAdvanced ? "收起目标" : "指定目标…"}
+            </Button>
+            <span className="text-xs text-muted-foreground">
+              {gh ? `GitHub：${gh.ready ? (gh.running ? "运行中" : "就绪") : "未配置"}${gh.files_fetched ? ` · 抓取 ${gh.files_fetched} 文件` : ""}${gh.last_error ? ` · ${gh.last_error.slice(0, 40)}` : ""}` : ""}
+            </span>
           </div>
 
-          {useSearch ? (
+          {showAdvanced ? (
             <div className="space-y-1.5">
-              <Label htmlFor="hunt-dorks" className="text-xs">自定义搜索词（留空用内置指纹词）</Label>
-              <Textarea
-                id="hunt-dorks"
-                value={dorks}
-                onChange={(e) => setDorks(e.target.value)}
-                placeholder={'app:"Ollama"\napp:"vLLM"\nweb.title="LibreChat"'}
-                className="min-h-16 font-mono text-xs"
-              />
+              <Label htmlFor="seeds" className="text-xs">目标清单（可选：host / host:端口 / URL，每行一个）</Label>
+              <Textarea id="seeds" value={seeds} onChange={(e) => setSeeds(e.target.value)}
+                placeholder={"10.0.0.5:11434\nllm.example.com"} className="min-h-16 font-mono text-xs" />
             </div>
           ) : null}
 
-          {last ? (
-            <p className="text-xs text-muted-foreground">
-              上次（#{last.id}）：{last.status} · {last.done}/{last.total} 目标 · 实例 {last.assets} · 密钥 {last.keys}
+          {autoVerify ? (
+            <p className="text-xs text-amber-600 dark:text-amber-400">
+              ⚠️ 自动验证会对每条新 key 向 OpenAI/Anthropic 发一次只读请求（列模型，不推理、不重试，每轮最多 10 条）。
+              请在你有权验证的范围内使用。
             </p>
           ) : null}
         </CardContent>
       </Card>
 
-      <Tabs defaultValue="assets" className="flex min-h-0 flex-1 flex-col">
+      {/* 结果 */}
+      <Tabs defaultValue="keys" className="flex min-h-0 flex-1 flex-col">
         <TabsList>
-          <TabsTrigger value="assets">发现的实例 <span className="ml-1 text-muted-foreground">{assets.length}</span></TabsTrigger>
-          <TabsTrigger value="keys">泄露的密钥 <span className="ml-1 text-muted-foreground">{keys.length}</span></TabsTrigger>
+          <TabsTrigger value="keys">密钥 <span className="ml-1 text-muted-foreground">{shown.length}</span></TabsTrigger>
+          <TabsTrigger value="assets">实例 <span className="ml-1 text-muted-foreground">{assets.length}</span></TabsTrigger>
         </TabsList>
+
+        <TabsContent value="keys" className="min-h-0 flex-1 overflow-auto">
+          <Card>
+            <CardContent className="space-y-3 pt-4">
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  onClick={() => setProvider("")}
+                  className={cn("rounded-full border px-2.5 py-0.5 text-[11px]",
+                    provider === "" ? "border-primary text-foreground" : "text-muted-foreground")}
+                >
+                  全部 {stats?.total ?? 0}
+                </button>
+                {providers.map(([p, n]) => (
+                  <button key={p} onClick={() => setProvider(p === provider ? "" : p)}
+                    className={cn("rounded-full border px-2.5 py-0.5 text-[11px]",
+                      provider === p ? "border-primary text-foreground" : "text-muted-foreground")}>
+                    {p} {n}
+                  </button>
+                ))}
+                <label className="ml-auto flex items-center gap-2 text-xs text-muted-foreground">
+                  <Switch checked={onlyVerified} onCheckedChange={setOnlyVerified} size="sm" />
+                  只看有效
+                </label>
+                <Button size="sm" variant="outline" onClick={verifyPending} disabled={status.running}>
+                  <ShieldCheckIcon className="size-3.5" /> 验证未验证的
+                </Button>
+              </div>
+
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead className="w-28">类型</TableHead>
+                    <TableHead className="w-44">掩码</TableHead>
+                    <TableHead className="w-24">可用性</TableHead>
+                    <TableHead>来源</TableHead>
+                    <TableHead className="w-40">发现时间</TableHead>
+                    <TableHead className="w-36" />
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {shown.length === 0 ? (
+                    <TableRow>
+                      <TableCell colSpan={6} className="text-muted-foreground">
+                        还没有密钥。点「开始狩猎」，默认会用空间测绘找暴露了密钥文件的页面。
+                      </TableCell>
+                    </TableRow>
+                  ) : (
+                    shown.map((k) => {
+                      const v = VERIFY_LABEL[k.verify_state ?? ""] ?? VERIFY_LABEL[""];
+                      return (
+                        <TableRow key={k.id}>
+                          <TableCell className="text-xs">{k.key_type}</TableCell>
+                          <TableCell className="font-mono text-xs">
+                            {revealed[k.id] ? <span className="text-destructive break-all">{revealed[k.id]}</span> : k.masked}
+                          </TableCell>
+                          <TableCell>
+                            <span className={cn("rounded px-1.5 py-0.5 text-[11px]", v.cls)} title={k.verify_note}>{v.text}</span>
+                          </TableCell>
+                          <TableCell className="max-w-96 truncate font-mono text-xs" title={k.url}>
+                            <span className="text-muted-foreground">{SOURCE_LABEL[k.source_kind ?? "target"] ?? k.source_kind} · </span>
+                            {k.repo || k.url}
+                          </TableCell>
+                          <TableCell className="text-muted-foreground text-xs">
+                            {(k.found_at ?? "").replace("T", " ").slice(0, 19)}
+                          </TableCell>
+                          <TableCell>
+                            <div className="flex gap-1">
+                              <Button variant="ghost" size="icon" title="复制掩码" onClick={() => copyMasked(k)}>
+                                <CopyIcon className={cn("size-3.5", copied === k.id && "text-emerald-500")} />
+                              </Button>
+                              <Button variant="ghost" size="icon" title="查看原文" onClick={() => reveal(k)}>
+                                <SearchIcon className="size-3.5" />
+                              </Button>
+                              <Button variant="ghost" size="icon" title="删除" onClick={() => del("keys", k.id)}>
+                                <Trash2Icon className="size-3.5" />
+                              </Button>
+                            </div>
+                          </TableCell>
+                        </TableRow>
+                      );
+                    })
+                  )}
+                </TableBody>
+              </Table>
+            </CardContent>
+          </Card>
+        </TabsContent>
 
         <TabsContent value="assets" className="min-h-0 flex-1 overflow-auto">
           <Card>
@@ -304,132 +362,38 @@ export default function LLMHuntPage() {
                 <TableHeader>
                   <TableRow>
                     <TableHead>URL</TableHead>
-                    <TableHead>组件</TableHead>
-                    <TableHead>版本</TableHead>
-                    <TableHead>未授权</TableHead>
+                    <TableHead className="w-36">组件</TableHead>
+                    <TableHead className="w-24">版本</TableHead>
+                    <TableHead className="w-28">未授权</TableHead>
                     <TableHead>模型</TableHead>
-                    <TableHead>来源</TableHead>
+                    <TableHead className="w-28">来源</TableHead>
                     <TableHead className="w-10" />
                   </TableRow>
                 </TableHeader>
                 <TableBody>
                   {assets.length === 0 ? (
                     <TableRow>
-                      <TableCell colSpan={7} className="text-muted-foreground">
-                        还没有结果。设置目标后点「开始测绘」。
+                      <TableCell colSpan={7} className="text-muted-foreground">还没有发现实例。</TableCell>
+                    </TableRow>
+                  ) : assets.map((a) => (
+                    <TableRow key={a.id}>
+                      <TableCell className="font-mono text-xs">{a.url}</TableCell>
+                      <TableCell className="text-xs">{a.vendor || "-"}</TableCell>
+                      <TableCell className="font-mono text-xs">{a.version || "-"}</TableCell>
+                      <TableCell>
+                        {a.unauth ? <Badge variant="destructive">可未授权</Badge> : <Badge variant="outline">否</Badge>}
+                      </TableCell>
+                      <TableCell className="max-w-72 truncate font-mono text-xs" title={(a.models ?? []).join(", ")}>
+                        {(a.models ?? []).slice(0, 4).join(", ") || "-"}
+                      </TableCell>
+                      <TableCell className="text-muted-foreground text-xs">{a.source}</TableCell>
+                      <TableCell>
+                        <Button variant="ghost" size="icon" onClick={() => del("assets", a.id)}>
+                          <Trash2Icon className="size-3.5" />
+                        </Button>
                       </TableCell>
                     </TableRow>
-                  ) : (
-                    assets.map((a) => (
-                      <TableRow key={a.id}>
-                        <TableCell className="font-mono text-xs">{a.url}</TableCell>
-                        <TableCell>{a.vendor || "-"}</TableCell>
-                        <TableCell className="font-mono text-xs">{a.version || "-"}</TableCell>
-                        <TableCell>
-                          {a.unauth ? <Badge variant="destructive">可未授权访问</Badge> : <Badge variant="outline">否</Badge>}
-                        </TableCell>
-                        <TableCell className="max-w-64 truncate font-mono text-xs" title={(a.models ?? []).join(", ")}>
-                          {(a.models ?? []).slice(0, 4).join(", ") || "-"}
-                        </TableCell>
-                        <TableCell className="text-muted-foreground text-xs">{a.source}</TableCell>
-                        <TableCell>
-                          <Button variant="ghost" size="icon" onClick={() => del("assets", a.id)}>
-                            <Trash2Icon className="size-3.5" />
-                          </Button>
-                        </TableCell>
-                      </TableRow>
-                    ))
-                  )}
-                </TableBody>
-              </Table>
-            </CardContent>
-          </Card>
-        </TabsContent>
-
-        <TabsContent value="keys" className="min-h-0 flex-1 overflow-auto">
-          <Card>
-            <CardContent className="space-y-3 pt-4">
-              <div className="flex flex-wrap items-center gap-2">
-                <Button size="sm" onClick={startGH} disabled={!ghStatus?.ready || ghStatus?.running}>
-                  {ghStatus?.running ? <Loader2Icon className="size-3.5 animate-spin" /> : <SearchIcon className="size-3.5" />}
-                  GitHub 公开仓库狩猎
-                </Button>
-                <Button size="sm" variant="outline" onClick={verifyKeys} disabled={ghStatus?.running}>
-                  <SearchIcon className="size-3.5" /> 验证可用性
-                </Button>
-                {ghStatus ? (
-                  <span className="text-xs text-muted-foreground">
-                    {ghStatus.ready ? (ghStatus.running ? "运行中…" : "就绪") : "未配置 token"}
-                    {ghStatus.dorks_done ? ` · 检索 ${ghStatus.dorks_done} 条` : ""}
-                    {ghStatus.files_fetched ? ` · 抓取 ${ghStatus.files_fetched} 个文件` : ""}
-                    {ghStatus.found ? ` · 命中 ${ghStatus.found}` : ""}
-                    {ghStatus.last_error ? ` · 错误: ${ghStatus.last_error.slice(0, 60)}` : ""}
-                  </span>
-                ) : null}
-                {stats ? (
-                  <span className="ml-auto flex flex-wrap gap-1">
-                    {Object.entries(stats.by_provider).sort((a, b) => b[1] - a[1]).slice(0, 6).map(([k, n]) => (
-                      <Badge key={k} variant="secondary" className="text-[11px]">{k} {n}</Badge>
-                    ))}
-                  </span>
-                ) : null}
-              </div>
-              <p className="text-xs text-muted-foreground">
-                默认只显示掩码；点「查看原文」才向服务端取一次明文，15 秒后自动隐藏，原文不写日志。
-                GitHub 狩猎只搜公开仓库（GitHub 自己的 secret scanning 也在扫同一批东西），不接触任何被测站点，且**只登记不验证**。
-              </p>
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>类型</TableHead>
-                    <TableHead>掩码</TableHead>
-                    <TableHead>来源</TableHead>
-                    <TableHead>可用性</TableHead>
-                    <TableHead>发现时间</TableHead>
-                    <TableHead className="w-32" />
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {keys.length === 0 ? (
-                    <TableRow>
-                      <TableCell colSpan={6} className="text-muted-foreground">
-                        还没有发现密钥。
-                      </TableCell>
-                    </TableRow>
-                  ) : (
-                    keys.map((k) => (
-                      <TableRow key={k.id}>
-                        <TableCell>{k.key_type}</TableCell>
-                        <TableCell className="font-mono text-xs">
-                          {revealed[k.id] ? <span className="text-destructive">{revealed[k.id]}</span> : k.masked}
-                        </TableCell>
-                        <TableCell className="max-w-80 truncate font-mono text-xs" title={k.url}>
-                          <span className="text-muted-foreground">{(k as LeakKey & { source_kind?: string }).source_kind === "github" ? "github: " : ""}</span>
-                          {(k as LeakKey & { repo?: string }).repo || k.url}
-                        </TableCell>
-                        <TableCell className="text-xs">
-                          {k.verify_state === "valid" ? <Badge variant="destructive">有效</Badge>
-                            : k.verify_state === "invalid" ? <Badge variant="outline">无效</Badge>
-                            : k.verify_state === "unsupported" ? <span className="text-muted-foreground">不验证</span>
-                            : k.verify_state === "error" ? <span className="text-muted-foreground">不确定</span>
-                            : <span className="text-muted-foreground">未验证</span>}
-                        </TableCell>
-                        <TableCell className="text-muted-foreground text-xs">
-                          {(k.found_at ?? "").replace("T", " ").slice(0, 19)}
-                        </TableCell>
-                        <TableCell>
-                          <div className="flex gap-1">
-                            <Button variant="outline" size="sm" className="h-7" onClick={() => reveal(k.id)}>
-                              <SearchIcon className="size-3" /> 原文
-                            </Button>
-                            <Button variant="ghost" size="icon" onClick={() => del("keys", k.id)}>
-                              <Trash2Icon className="size-3.5" />
-                            </Button>
-                          </div>
-                        </TableCell>
-                      </TableRow>
-                    ))
-                  )}
+                  ))}
                 </TableBody>
               </Table>
             </CardContent>
@@ -440,7 +404,28 @@ export default function LLMHuntPage() {
   );
 }
 
-// api 是极简 fetch 包装：与 SPA 一致地带同源凭据，非 2xx 抛错。
+function Kpi({ label, value, hint, tone }: { label: string; value: React.ReactNode; hint?: string; tone?: "bad" | "muted" }) {
+  return (
+    <Card>
+      <CardContent className="py-3">
+        <p className="text-xs text-muted-foreground">{label}</p>
+        <p className={cn("mt-0.5 text-2xl font-semibold tabular-nums",
+          tone === "bad" ? "text-destructive" : tone === "muted" ? "text-muted-foreground" : "")}>{value}</p>
+        {hint ? <p className="mt-0.5 text-[11px] text-muted-foreground">{hint}</p> : null}
+      </CardContent>
+    </Card>
+  );
+}
+
+function Toggle({ checked, onChange, label, title }: { checked: boolean; onChange: (v: boolean) => void; label: string; title?: string }) {
+  return (
+    <label className="flex items-center gap-2 text-sm" title={title}>
+      <Switch checked={checked} onCheckedChange={onChange} size="sm" />
+      {label}
+    </label>
+  );
+}
+
 async function api<T>(path: string, opts?: RequestInit): Promise<T> {
   const r = await fetch(path, {
     credentials: "same-origin",

@@ -318,9 +318,30 @@ func looksLikeRealKey(k string) bool {
 	if placeholderRE.MatchString(k) {
 		return false
 	}
-	// 同一字符连续出现 6 次以上，基本是填充串
-	if regexp.MustCompile(`(.)\1{5,}`).MatchString(k) {
+	// 同一字符连续出现 6 次以上，基本是填充串。
+	// 注意不能用正则的**反向引用**：Go 的 RE2 不支持，MustCompile 会直接 panic
+	// （线上就是崩在这里）。手写扫描即可。
+	if hasRunOfChars(k, 6) {
 		return false
 	}
 	return true
+}
+
+// hasRunOfChars 判断 s 里是否有同一字节连续出现 n 次以上。
+func hasRunOfChars(s string, n int) bool {
+	if n <= 1 {
+		return len(s) > 0
+	}
+	run := 1
+	for i := 1; i < len(s); i++ {
+		if s[i] == s[i-1] {
+			run++
+			if run >= n {
+				return true
+			}
+		} else {
+			run = 1
+		}
+	}
+	return false
 }

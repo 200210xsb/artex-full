@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/Autumn-27/artex/llmhunt"
 	actool "github.com/Autumn-27/norma/tool"
@@ -19,7 +20,11 @@ var verifierOnce sync.Once
 
 // llmVerifier 返回密钥验证器（进程内单例）。
 func (s *Server) llmVerifier() *llmhunt.Verifier {
-	verifierOnce.Do(func() { s.llmVerify = llmhunt.NewVerifier(s.m.pg) })
+	verifierOnce.Do(func() {
+		s.llmVerify = llmhunt.NewVerifier(s.m.pg)
+		// 验证请求走全局代理出口：厂商 API 从国内直连不通。
+		s.llmVerify.SetProxy(s.m.GlobalProxy())
+	})
 	return s.llmVerify
 }
 
@@ -149,7 +154,10 @@ func (s *Server) llmHuntScan(w http.ResponseWriter, r *http.Request) {
 		Dorks         string `json:"dorks"`       // 自定义搜索词（每行一个；空=内置）
 		MaxFromSearch int    `json:"max_from_search"`
 		AllowAuth     bool   `json:"allow_auth"` // 默认口令探测（POST，仅授权目标）
-		HuntLeaks     bool   `json:"hunt_leaks"` // 先找"响应里已含 key"的 URL（Hunter/Quake）
+		HuntLeaks     bool   `json:"hunt_leaks"`
+		Repeat        bool   `json:"repeat"` // 持续狩猎（每 5 分钟一轮，直到停止）
+		RepeatMinutes int    `json:"repeat_minutes"`
+		AutoVerify    bool   `json:"auto_verify"` // 每轮自动验证新 key（默认关） // 先找"响应里已含 key"的 URL（Hunter/Quake）
 		MaxTargets    int    `json:"max_targets"`
 	}
 	if err := decode(r, &req); err != nil {
@@ -205,6 +213,9 @@ func (s *Server) llmHuntScan(w http.ResponseWriter, r *http.Request) {
 		MaxFromSearch:   req.MaxFromSearch,
 		AllowAuthChecks: req.AllowAuth,
 		HuntLeaks:       req.HuntLeaks,
+		Repeat:          req.Repeat,
+		AutoVerify:      req.AutoVerify,
+		RepeatEvery:     time.Duration(maxInt(req.RepeatMinutes, 5)) * time.Minute,
 		// 探测目标走全局代理出口（不暴露 VPS 自己的 IP）。
 		Proxy: s.m.GlobalProxy(),
 	})
@@ -298,4 +309,12 @@ func (s *Server) llmHuntDeleteAsset(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]any{"deleted": id})
+}
+
+// maxInt 返回较大的那个（用于给重复间隔一个下限）。
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }

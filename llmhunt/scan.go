@@ -26,12 +26,15 @@ import (
 )
 
 const (
-	perHostGap     = 1200 * time.Millisecond
+	// perHostGap：同一主机两次请求的最小间隔。跨主机是并发的，所以这个值只影响
+	// "同一站点内部的节奏"——它防的是把单个站点打疼，不是限制总速度。
+	perHostGap     = 300 * time.Millisecond
 	perHostMaxReqs = 8
-	globalHosts    = 4
-	bodyLimit      = 256 * 1024
-	keyBodyLimit   = 64 * 1024
-	reqTimeout     = 12 * time.Second
+	// globalHosts：同时探测的主机数。调高只增加"不同站点"的并行度。
+	globalHosts  = 12
+	bodyLimit    = 256 * 1024
+	keyBodyLimit = 64 * 1024
+	reqTimeout   = 12 * time.Second
 )
 
 // Target 是一台待测主机。
@@ -59,6 +62,13 @@ type Options struct {
 	// HuntLeaks 先跑"泄漏文件狩猎"：用 Hunter/Quake 找响应体里本来就含 key 的 URL。
 	// 这是拿 key 最短的路径，优先级高于"先找实例再猜路径"。
 	HuntLeaks bool
+	// Repeat 让"泄漏文件狩猎"反复跑（每轮间隔 RepeatEvery），直到 Stop。
+	// 只用于积累发现；不会自动验证/使用任何 key。
+	Repeat      bool
+	RepeatEvery time.Duration
+	// AutoVerify 开启后，每轮狩猎结束会对**新发现**的 key 各发一次免费只读请求，
+	// 判断有效/无效（每轮上限 10 条）。默认关；只应在你有权验证的范围里开。
+	AutoVerify bool
 	// Proxy 是探测目标时使用的出口代理（http/socks5）。空 = 直连。
 	// 走全局代理的目的很实际：别把 VPS 自己的 IP 打进各种黑名单，也别让
 	// 目标看到"从机房 IP 来的扫描"。搜索/空间测绘的 API 调用仍走直连 ——
@@ -200,9 +210,33 @@ func (s *Scanner) run(ctx context.Context, scanID int64, opts Options) {
 
 	// ① 泄漏文件狩猎优先：直接找"响应里已经有 key"的 URL。
 	if opts.HuntLeaks {
-		fetched, found := s.huntLeaks(ctx)
-		s.logf("泄漏文件狩猎：抓取 %d 个 URL，命中 %d 条 key", fetched, found)
-		_ = s.pg.UpdateLLMScan(scanID, s.done, s.assets, s.keys, "", "")
+		every := opts.RepeatEvery
+		if every <= 0 {
+			every = 5 * time.Minute
+		}
+		for round := 1; ; round++ {
+			if ctx.Err() != nil {
+				break
+			}
+			fetched, found := s.huntLeaks(ctx)
+			verified := ""
+			if opts.AutoVerify && found > 0 {
+				t, okV := s.VerifyNewKeys(ctx, 10)
+				if t > 0 {
+					verified = fmt.Sprintf("，自动验证 %d 条（有效 %d）", t, okV)
+				}
+			}
+			s.logf("泄漏狩猎第 %d 轮：抓取 %d 个 URL，命中 %d 条 key（累计 %d）%s", round, fetched, found, s.keysNow(), verified)
+			_ = s.pg.UpdateLLMScan(scanID, s.done, s.assets, s.keys, "", "")
+			if !opts.Repeat {
+				break
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(every):
+			}
+		}
 	}
 
 	// ② 搜索发现：放在后台做，别把 HTTP 请求拖成长连接。
@@ -561,4 +595,11 @@ func (s *Scanner) scanClientOrDefault() *http.Client {
 		return c
 	}
 	return s.client
+}
+
+// keysNow 返回本轮已登记的 key 数。
+func (s *Scanner) keysNow() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.keys
 }

@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/Autumn-27/artex/db"
@@ -46,6 +48,25 @@ var verifyTargets = map[string]verifyTarget{
 type Verifier struct {
 	pg     *db.DB
 	client *http.Client
+}
+
+// SetProxy 让验证请求走指定出口（http/socks5）。
+//
+// 必须走代理：api.openai.com / api.anthropic.com 从国内直连不通，之前所有验证都
+// 被记成"请求失败（网络/超时）"，看起来像密钥无效，其实是我们没出去。
+func (v *Verifier) SetProxy(raw string) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return
+	}
+	v.client = &http.Client{
+		Timeout:   20 * time.Second,
+		Transport: &http.Transport{Proxy: http.ProxyURL(u)},
+	}
 }
 
 // NewVerifier 构造验证器。
@@ -106,4 +127,17 @@ func (v *Verifier) verifyOne(ctx context.Context, vt verifyTarget, key string) (
 	default:
 		return "error", fmt.Sprintf("厂商返回 %d", resp.StatusCode)
 	}
+}
+
+// VerifyNewKeys 验证"本轮新发现"的 key（每条一次、上限 limit）。
+//
+// 只用于 OpenAI / Anthropic 这类有免费只读接口（列模型）的厂商；不发推理请求。
+func (s *Scanner) VerifyNewKeys(ctx context.Context, limit int) (tried, valid int) {
+	v := NewVerifier(s.pg)
+	t, ok, err := v.VerifyPending(ctx, limit)
+	if err != nil {
+		s.logf("自动验证失败: %v", err)
+		return 0, 0
+	}
+	return t, ok
 }

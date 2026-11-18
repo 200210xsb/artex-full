@@ -295,6 +295,7 @@ type KeyStats struct {
 	ByProvider map[string]int `json:"by_provider"`
 	BySource   map[string]int `json:"by_source"`
 	Total      int            `json:"total"`
+	Verified   int            `json:"verified"`
 }
 
 // LLMKeyStats 统计密钥分布。
@@ -315,6 +316,10 @@ func (d *DB) LLMKeyStats() (*KeyStats, error) {
 		st.BySource[src] += n
 		st.Total += n
 	}
+	// 有效数
+	var valid int
+	_ = d.QueryRow(`SELECT count(*) FROM llm_keys WHERE verify_state='valid'`).Scan(&valid)
+	st.Verified = valid
 	return st, rows.Err()
 }
 
