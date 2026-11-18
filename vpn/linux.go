@@ -389,10 +389,14 @@ func (m *Manager) startSocks(inst *instance, dir string) error {
 	// 隧道里没有 IPv6 通路，但平台 DNS 会返回 A+AAAA 混合。策略固定 ipv4_only：
 	// 否则一次域名拨号可能先试 AAAA、超时后才回 A，外部表现成"目标偶发不可达"，
 	// 会被 agent 误判成站点挂了（实测 erp.hxfl.com.cn 一度 000，同一域名稍后 200）。
+	// 注意：outbound 上的 domain_strategy 在 sing-box 1.12+ 已废弃、1.13 直接 FATAL
+	// （报 legacy domain strategy options is deprecated）。IPv4-only 只靠 dns.strategy，
+	// 这个写法在 1.13 上是合法的。曾经因为留着那个字段，sing-box 起不来，
+	// 外部只看到"端口 1080 未监听"，很难查。
 	cfg := fmt.Sprintf(`{"log":{"level":"warn"},
  "dns":{"servers":[{"type":"local"}],"strategy":"ipv4_only"},
  "inbounds":[{"type":"mixed","listen":%q,"listen_port":%d}],
- "outbounds":[{"type":"direct","tag":"direct","domain_strategy":"ipv4_only"}]}`, inst.nsIP, socksPort)
+ "outbounds":[{"type":"direct","tag":"direct"}]}`, inst.nsIP, socksPort)
 	cfgPath := filepath.Join(dir, "socks.json")
 	if err := os.WriteFile(cfgPath, []byte(cfg), 0o600); err != nil {
 		return fmt.Errorf("写入 SOCKS 配置失败: %w", err)
@@ -400,6 +404,18 @@ func (m *Manager) startSocks(inst *instance, dir string) error {
 	bin := m.singbox
 	if bin == "" {
 		return errors.New("未找到 sing-box")
+	}
+	// 先做一次配置预检：配置写错时 sing-box 会立刻退出，外部只看得到"端口没监听"，
+	// 排查成本极高。这里把真实错误直接带出来。
+	if out, err := exec.Command(bin, "check", "-c", cfgPath).CombinedOutput(); err != nil {
+		msg := strings.TrimSpace(string(out))
+		if i := strings.Index(msg, "FATAL"); i >= 0 {
+			msg = msg[i:]
+		}
+		if len(msg) > 300 {
+			msg = msg[:300]
+		}
+		return fmt.Errorf("隧道内 SOCKS 配置无效: %s", msg)
 	}
 	cmd := exec.Command("ip", "netns", "exec", inst.netns, bin, "run", "-c", cfgPath)
 	if err := cmd.Start(); err != nil {

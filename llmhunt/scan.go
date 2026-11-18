@@ -421,7 +421,7 @@ func (s *Scanner) extractKeys(srcURL string, assetID int64, body string) int {
 	n := 0
 	for _, kp := range keyPatterns {
 		for _, m := range kp.re.FindAllString(body, 5) {
-			if len(m) < 12 {
+			if !looksLikeRealKey(m) {
 				continue
 			}
 			sum := sha256.Sum256([]byte(m))

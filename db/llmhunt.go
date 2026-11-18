@@ -35,11 +35,16 @@ type LLMKey struct {
 	URL     string `json:"url"`
 	KeyType string `json:"key_type"`
 	// Raw 是密钥原文：只落库、永不外传（json:"-"），接口一律只回 Masked。
-	Raw         string    `json:"-"`
-	Masked      string    `json:"masked"`
-	Fingerprint string    `json:"fingerprint"`
-	Context     string    `json:"context"`
-	FoundAt     time.Time `json:"found_at"`
+	Raw         string     `json:"-"`
+	Masked      string     `json:"masked"`
+	Fingerprint string     `json:"fingerprint"`
+	Context     string     `json:"context"`
+	SourceKind  string     `json:"source_kind"` // github / target / target-js
+	Repo        string     `json:"repo"`
+	VerifyState string     `json:"verify_state"` // ''|valid|invalid|unsupported|error
+	VerifyNote  string     `json:"verify_note"`
+	VerifiedAt  *time.Time `json:"verified_at,omitempty"`
+	FoundAt     time.Time  `json:"found_at"`
 }
 
 // EnsureLLMHuntTables 建表（幂等）。
@@ -81,6 +86,16 @@ func (d *DB) EnsureLLMHuntTables() error {
 			UNIQUE (fingerprint, url)
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_llm_keys_type ON llm_keys(key_type)`,
+		// key 狩猎升级：记录是从哪类源拿到的（github 公开仓库 / 目标 JS / 目标接口），
+		// 以及归属厂商（OpenAI/Anthropic/阿里云…），界面上要能按这两维筛选。
+		`ALTER TABLE llm_keys ADD COLUMN IF NOT EXISTS source_kind text NOT NULL DEFAULT 'target'`,
+		`ALTER TABLE llm_keys ADD COLUMN IF NOT EXISTS repo text NOT NULL DEFAULT ''`,
+		// 同一个 key 在多处出现只保留首次：按指纹去重，避免界面被同一把 key 刷屏。
+		`CREATE UNIQUE INDEX IF NOT EXISTS uq_llm_keys_fp ON llm_keys(fingerprint)`,
+		// 可用性验证结果：''=未验证 / valid / invalid / unsupported / error。
+		`ALTER TABLE llm_keys ADD COLUMN IF NOT EXISTS verify_state text NOT NULL DEFAULT ''`,
+		`ALTER TABLE llm_keys ADD COLUMN IF NOT EXISTS verify_note text NOT NULL DEFAULT ''`,
+		`ALTER TABLE llm_keys ADD COLUMN IF NOT EXISTS verified_at timestamptz`,
 		`CREATE TABLE IF NOT EXISTS llm_scans (
 			id         bigserial PRIMARY KEY,
 			status     text NOT NULL DEFAULT 'running',
@@ -119,10 +134,11 @@ RETURNING id`,
 // InsertLLMKey 落一条密钥；重复（同指纹同来源）忽略。
 func (d *DB) InsertLLMKey(k *LLMKey) (bool, error) {
 	res, err := d.Exec(`
-INSERT INTO llm_keys(asset_id,url,key_type,raw,masked,fingerprint,context)
-VALUES($1,$2,$3,$4,$5,$6,$7)
-ON CONFLICT (fingerprint,url) DO NOTHING`,
-		nullIfZero(k.AssetID), k.URL, k.KeyType, k.Raw, k.Masked, k.Fingerprint, k.Context)
+INSERT INTO llm_keys(asset_id,url,key_type,raw,masked,fingerprint,context,source_kind,repo)
+VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9)
+ON CONFLICT (fingerprint) DO NOTHING`,
+		nullIfZero(k.AssetID), k.URL, k.KeyType, k.Raw, k.Masked, k.Fingerprint, k.Context,
+		orDefault(k.SourceKind, "target"), k.Repo)
 	if err != nil {
 		return false, err
 	}
@@ -160,7 +176,7 @@ func (d *DB) ListLLMKeys(limit int) ([]LLMKey, error) {
 	if limit <= 0 || limit > 500 {
 		limit = 200
 	}
-	rows, err := d.Query(`SELECT id,coalesce(asset_id,0),url,key_type,masked,fingerprint,context,found_at
+	rows, err := d.Query(`SELECT id,coalesce(asset_id,0),url,key_type,masked,fingerprint,context,found_at,source_kind,repo,verify_state,verify_note,verified_at
 FROM llm_keys ORDER BY found_at DESC LIMIT $1`, limit)
 	if err != nil {
 		return nil, err
@@ -169,7 +185,7 @@ FROM llm_keys ORDER BY found_at DESC LIMIT $1`, limit)
 	var out []LLMKey
 	for rows.Next() {
 		var k LLMKey
-		if err := rows.Scan(&k.ID, &k.AssetID, &k.URL, &k.KeyType, &k.Masked, &k.Fingerprint, &k.Context, &k.FoundAt); err != nil {
+		if err := rows.Scan(&k.ID, &k.AssetID, &k.URL, &k.KeyType, &k.Masked, &k.Fingerprint, &k.Context, &k.FoundAt, &k.SourceKind, &k.Repo, &k.VerifyState, &k.VerifyNote, &k.VerifiedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, k)
@@ -272,4 +288,81 @@ func decodeStringSlice(raw string) []string {
 func (d *DB) SetLLMScanTotal(id int64, total int) error {
 	_, err := d.Exec(`UPDATE llm_scans SET total=$2 WHERE id=$1`, id, total)
 	return err
+}
+
+// KeyStats 是按厂商/来源分组的计数，界面上做筛选用。
+type KeyStats struct {
+	ByProvider map[string]int `json:"by_provider"`
+	BySource   map[string]int `json:"by_source"`
+	Total      int            `json:"total"`
+}
+
+// LLMKeyStats 统计密钥分布。
+func (d *DB) LLMKeyStats() (*KeyStats, error) {
+	st := &KeyStats{ByProvider: map[string]int{}, BySource: map[string]int{}}
+	rows, err := d.Query(`SELECT key_type, source_kind, count(*) FROM llm_keys GROUP BY 1,2`)
+	if err != nil {
+		return st, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var t, src string
+		var n int
+		if rows.Scan(&t, &src, &n) != nil {
+			continue
+		}
+		st.ByProvider[t] += n
+		st.BySource[src] += n
+		st.Total += n
+	}
+	return st, rows.Err()
+}
+
+// orDefault 返回 s，空则返回 def。
+func orDefault(s, def string) string {
+	if s == "" {
+		return def
+	}
+	return s
+}
+
+// SetLLMKeyVerify 记录某条 key 的可用性验证结果。
+func (d *DB) SetLLMKeyVerify(id int64, state, note string) error {
+	_, err := d.Exec(`UPDATE llm_keys SET verify_state=$2, verify_note=$3, verified_at=now() WHERE id=$1`, id, state, note)
+	return err
+}
+
+// UnverifiedKeys 取出待验证的 key（限制条数，按发现时间倒序）。
+func (d *DB) UnverifiedKeys(limit int) ([]struct {
+	ID     int64
+	Type   string
+	Raw    string
+	Masked string
+}, error) {
+	if limit <= 0 || limit > 50 {
+		limit = 20
+	}
+	rows, err := d.Query(`SELECT id, key_type, raw, masked FROM llm_keys WHERE verify_state='' ORDER BY found_at DESC LIMIT $1`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []struct {
+		ID     int64
+		Type   string
+		Raw    string
+		Masked string
+	}
+	for rows.Next() {
+		var r struct {
+			ID     int64
+			Type   string
+			Raw    string
+			Masked string
+		}
+		if rows.Scan(&r.ID, &r.Type, &r.Raw, &r.Masked) == nil {
+			out = append(out, r)
+		}
+	}
+	return out, rows.Err()
 }

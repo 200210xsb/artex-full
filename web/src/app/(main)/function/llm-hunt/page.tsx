@@ -45,6 +45,10 @@ type LeakKey = {
   masked: string;
   url: string;
   found_at: string;
+  source_kind?: string;
+  repo?: string;
+  verify_state?: string;
+  verify_note?: string;
 };
 type ScanStatus = {
   running: boolean;
@@ -66,11 +70,16 @@ export default function LLMHuntPage() {
   const [keys, setKeys] = React.useState<LeakKey[]>([]);
   const [busy, setBusy] = React.useState(false);
   const [revealed, setRevealed] = React.useState<Record<number, string>>({});
+  // 密钥狩猎（GitHub 公开仓库）与统计
+  const [ghStatus, setGhStatus] = React.useState<{ ready: boolean; running: boolean; found: number } | null>(null);
+  const [stats, setStats] = React.useState<{ by_provider: Record<string, number>; by_source: Record<string, number>; total: number } | null>(null);
 
   const load = React.useCallback(() => {
     api<ScanStatus>("/api/llmhunt/status").then(setStatus).catch(() => {});
     api<{ assets: Asset[] }>("/api/llmhunt/assets").then((r) => setAssets(r.assets ?? [])).catch(() => {});
     api<{ keys: LeakKey[] }>("/api/llmhunt/keys").then((r) => setKeys(r.keys ?? [])).catch(() => {});
+    api<typeof ghStatus>("/api/llmhunt/keyhunt/status").then(setGhStatus).catch(() => {});
+    api<typeof stats>("/api/llmhunt/key-stats").then(setStats).catch(() => {});
   }, []);
 
   React.useEffect(() => {
@@ -87,6 +96,30 @@ export default function LLMHuntPage() {
     }, 4000);
     return () => clearInterval(t);
   }, [load]);
+
+  const verifyKeys = async () => {
+    if (!confirm("验证会用这些密钥向厂商发起一次只读请求（仅列模型，不推理、不重试）。只应在你有权验证的密钥上使用。继续？")) return;
+    try {
+      const r = await api<{ tried: number; valid: number }>("/api/llmhunt/keys/verify", {
+        method: "POST",
+        body: JSON.stringify({ confirm: true, limit: 20 }),
+      });
+      toast.success(`已验证 ${r.tried} 条，其中有效 ${r.valid} 条`);
+      load();
+    } catch (e) {
+      toast.error("验证失败：" + (e as Error).message);
+    }
+  };
+
+  const startGH = async () => {
+    try {
+      await api("/api/llmhunt/keyhunt/start", { method: "POST", body: "{}" });
+      toast.success("已开始 GitHub 密钥狩猎（公开仓库，只登记不验证）");
+      load();
+    } catch (e) {
+      toast.error("启动失败：" + (e as Error).message);
+    }
+  };
 
   const start = async () => {
     if (!seeds.trim() && !fromAssets && !useSearch) {
@@ -305,9 +338,32 @@ export default function LLMHuntPage() {
 
         <TabsContent value="keys" className="min-h-0 flex-1 overflow-auto">
           <Card>
-            <CardContent className="space-y-2 pt-4">
+            <CardContent className="space-y-3 pt-4">
+              <div className="flex flex-wrap items-center gap-2">
+                <Button size="sm" onClick={startGH} disabled={!ghStatus?.ready || ghStatus?.running}>
+                  {ghStatus?.running ? <Loader2Icon className="size-3.5 animate-spin" /> : <SearchIcon className="size-3.5" />}
+                  GitHub 公开仓库狩猎
+                </Button>
+                <Button size="sm" variant="outline" onClick={verifyKeys} disabled={ghStatus?.running}>
+                  <SearchIcon className="size-3.5" /> 验证可用性
+                </Button>
+                {ghStatus ? (
+                  <span className="text-xs text-muted-foreground">
+                    {ghStatus.ready ? (ghStatus.running ? "运行中…" : "就绪") : "未配置 token"}
+                    {ghStatus.found > 0 ? ` · 本轮新增 ${ghStatus.found}` : ""}
+                  </span>
+                ) : null}
+                {stats ? (
+                  <span className="ml-auto flex flex-wrap gap-1">
+                    {Object.entries(stats.by_provider).sort((a, b) => b[1] - a[1]).slice(0, 6).map(([k, n]) => (
+                      <Badge key={k} variant="secondary" className="text-[11px]">{k} {n}</Badge>
+                    ))}
+                  </span>
+                ) : null}
+              </div>
               <p className="text-xs text-muted-foreground">
-                默认只显示掩码。点「查看原文」才向服务端取一次明文，15 秒后自动隐藏；原文不写日志。
+                默认只显示掩码；点「查看原文」才向服务端取一次明文，15 秒后自动隐藏，原文不写日志。
+                GitHub 狩猎只搜公开仓库（GitHub 自己的 secret scanning 也在扫同一批东西），不接触任何被测站点，且**只登记不验证**。
               </p>
               <Table>
                 <TableHeader>
@@ -315,6 +371,7 @@ export default function LLMHuntPage() {
                     <TableHead>类型</TableHead>
                     <TableHead>掩码</TableHead>
                     <TableHead>来源</TableHead>
+                    <TableHead>可用性</TableHead>
                     <TableHead>发现时间</TableHead>
                     <TableHead className="w-32" />
                   </TableRow>
@@ -322,7 +379,7 @@ export default function LLMHuntPage() {
                 <TableBody>
                   {keys.length === 0 ? (
                     <TableRow>
-                      <TableCell colSpan={5} className="text-muted-foreground">
+                      <TableCell colSpan={6} className="text-muted-foreground">
                         还没有发现密钥。
                       </TableCell>
                     </TableRow>
@@ -334,7 +391,15 @@ export default function LLMHuntPage() {
                           {revealed[k.id] ? <span className="text-destructive">{revealed[k.id]}</span> : k.masked}
                         </TableCell>
                         <TableCell className="max-w-80 truncate font-mono text-xs" title={k.url}>
-                          {k.url}
+                          <span className="text-muted-foreground">{(k as LeakKey & { source_kind?: string }).source_kind === "github" ? "github: " : ""}</span>
+                          {(k as LeakKey & { repo?: string }).repo || k.url}
+                        </TableCell>
+                        <TableCell className="text-xs">
+                          {k.verify_state === "valid" ? <Badge variant="destructive">有效</Badge>
+                            : k.verify_state === "invalid" ? <Badge variant="outline">无效</Badge>
+                            : k.verify_state === "unsupported" ? <span className="text-muted-foreground">不验证</span>
+                            : k.verify_state === "error" ? <span className="text-muted-foreground">不确定</span>
+                            : <span className="text-muted-foreground">未验证</span>}
                         </TableCell>
                         <TableCell className="text-muted-foreground text-xs">
                           {(k.found_at ?? "").replace("T", " ").slice(0, 19)}

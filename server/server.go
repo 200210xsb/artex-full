@@ -43,9 +43,13 @@ var BuildVersion = "dev"
 type Server struct {
 	// llmHunt 是"大模型资产测绘"的扫描器（进程内单例，同一时刻只允许一次扫描）。
 	llmHunt *llmhunt.Scanner
-	m       *Manager
-	engine  *Engine
-	ctx     context.Context
+	// llmGH 是 GitHub 公开仓库的密钥狩猎器（不接触被测站点）。
+	llmGH *llmhunt.GitHubKeyHunter
+	// llmVerify 负责密钥可用性验证（只在显式确认时调用）。
+	llmVerify *llmhunt.Verifier
+	m         *Manager
+	engine    *Engine
+	ctx       context.Context
 
 	skillDir string // root directory for skill subdirectories
 	jwtKey   []byte // HS256 signing key loaded from / generated into dataDir/jwt.key
@@ -839,6 +843,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/llmhunt/status", s.llmHuntStatus)
 	mux.HandleFunc("GET /api/llmhunt/assets", s.llmHuntAssets)
 	mux.HandleFunc("GET /api/llmhunt/keys", s.llmHuntKeys)
+	mux.HandleFunc("POST /api/llmhunt/keyhunt/start", s.llmKeyHuntStart)
+	mux.HandleFunc("POST /api/llmhunt/keys/verify", s.llmVerifyKeys)
+	mux.HandleFunc("GET /api/llmhunt/keyhunt/status", s.llmKeyHuntStatus)
+	mux.HandleFunc("GET /api/llmhunt/key-stats", s.llmKeyStats)
 	mux.HandleFunc("GET /api/llmhunt/keys/{id}/reveal", s.llmHuntReveal)
 	mux.HandleFunc("DELETE /api/llmhunt/keys/{id}", s.llmHuntDeleteKey)
 	mux.HandleFunc("DELETE /api/llmhunt/assets/{id}", s.llmHuntDeleteAsset)

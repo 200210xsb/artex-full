@@ -15,6 +15,79 @@ import (
 // 大模型资产测绘：扫描器按 Server 单例持有（同一时刻只允许一次扫描）。
 var llmHuntOnce sync.Once
 
+var verifierOnce sync.Once
+
+// llmVerifier 返回密钥验证器（进程内单例）。
+func (s *Server) llmVerifier() *llmhunt.Verifier {
+	verifierOnce.Do(func() { s.llmVerify = llmhunt.NewVerifier(s.m.pg) })
+	return s.llmVerify
+}
+
+// llmVerifyKeys 验证尚未验证的密钥可用性。
+//
+// 必须显式带 confirm=true：这一步会**用别人的凭据**向厂商发一次只读请求，
+// 只在你有权验证的 key 上使用。
+func (s *Server) llmVerifyKeys(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Confirm bool `json:"confirm"`
+		Limit   int  `json:"limit"`
+	}
+	if err := decode(r, &req); err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	if !req.Confirm {
+		writeErr(w, 400, "需要显式确认（confirm=true）：验证会用该密钥向厂商发起一次只读请求")
+		return
+	}
+	tried, valid, err := s.llmVerifier().VerifyPending(r.Context(), req.Limit)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"tried": tried, "valid": valid})
+}
+
+var ghHunterOnce sync.Once
+
+// llmKeyHunter 返回 GitHub 密钥狩猎器（进程内单例）。
+func (s *Server) llmKeyHunter() *llmhunt.GitHubKeyHunter {
+	ghHunterOnce.Do(func() {
+		s.llmGH = llmhunt.NewGitHubKeyHunter(s.m.pg, "")
+	})
+	return s.llmGH
+}
+
+// llmKeyHuntStart 启动一轮 GitHub 公开仓库密钥狩猎。
+func (s *Server) llmKeyHuntStart(w http.ResponseWriter, r *http.Request) {
+	h := s.llmKeyHunter()
+	if !h.Ready() {
+		writeErr(w, 400, "未配置 GitHub token：把 PAT 写到 /root/.artex-gh-token 或设置 ARTEX_GH_TOKEN")
+		return
+	}
+	if err := h.Start(r.Context()); err != nil {
+		writeErr(w, 409, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"ok": true})
+}
+
+// llmKeyHuntStatus 查询密钥狩猎状态。
+func (s *Server) llmKeyHuntStatus(w http.ResponseWriter, r *http.Request) {
+	h := s.llmKeyHunter()
+	writeJSON(w, 200, map[string]any{"ready": h.Ready(), "running": h.Running(), "found": h.Found()})
+}
+
+// llmKeyStats 按厂商/来源统计密钥。
+func (s *Server) llmKeyStats(w http.ResponseWriter, r *http.Request) {
+	st, err := s.m.pg.LLMKeyStats()
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, st)
+}
+
 func (s *Server) llmScanner() *llmhunt.Scanner {
 	llmHuntOnce.Do(func() {
 		s.llmHunt = llmhunt.New(s.m.pg)
