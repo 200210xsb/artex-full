@@ -85,9 +85,12 @@ func (s Status) Up() bool { return s.State == StateUp }
 
 // Manager owns the tunnels. One per process.
 type Manager struct {
-	dir      string // where generated configs and credential files live
-	singbox  string // sing-box binary used as the in-namespace SOCKS server
-	probeURL string // plain-HTTP endpoint that echoes the caller's IP
+	// activeBinding 由 server 注入：某 profile 是否还有任务绑定且在跑。
+	// 为 nil 时退化为纯空闲判定（旧行为）。
+	activeBinding ActiveBinding
+	dir           string // where generated configs and credential files live
+	singbox       string // sing-box binary used as the in-namespace SOCKS server
+	probeURL      string // plain-HTTP endpoint that echoes the caller's IP
 
 	mu     sync.Mutex
 	items  map[string]*instance
@@ -379,7 +382,15 @@ func (m *Manager) startJanitor() {
 	})
 }
 
-// reapIdle 停掉长时间没人用的隧道。
+// ActiveBinding 由 server 层注入：报告某 profile 是否还有任务绑定且在跑。
+type ActiveBinding func(profileID int64) bool
+
+// SetActiveBindingCheck 注入占用检查（server 启动时调用一次）。
+func (m *Manager) SetActiveBindingCheck(fn ActiveBinding) {
+	m.activeBinding = fn
+}
+
+// reapIdle 停掉长时间没人用、且没有任务绑定的隧道。
 func (m *Manager) reapIdle() {
 	m.mu.Lock()
 	keys := make([]string, 0, len(m.items))
@@ -401,7 +412,15 @@ func (m *Manager) reapIdle() {
 		inst.mu.Lock()
 		idle := inst.state == StateUp && !inst.lastUsed.IsZero() && time.Since(inst.lastUsed) > idleTTL
 		name := inst.profile.Name
+		profID := inst.profile.ID
+		lastUsed := inst.lastUsed
 		inst.mu.Unlock()
+
+		// 时间没到但已经没有任务绑定：超过宽限期也回收。宽限期取 idleTTL 的一半，
+		// 避免任务里两步操作间隔稍长就把隧道拆了。
+		if !idle && !lastUsed.IsZero() && time.Since(lastUsed) > idleTTL/2 && m.activeBinding != nil && !m.activeBinding(profID) {
+			idle = true
+		}
 
 		if idle {
 			// Stop 会把状态置为 Stopped；monitor 重连前会重新检查状态，因此不会把

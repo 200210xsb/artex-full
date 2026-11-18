@@ -448,6 +448,9 @@ func NewManager(dir, proxyAddr string) (*Manager, error) {
 	}
 	m := &Manager{dir: dir, pg: pg, assets: pg.Assets(), tasks: map[string]*Task{}, interceptor: intercept.New(pg)}
 	m.vpnMgr = vpn.New(filepath.Join(dir, "vpn"), singBoxBinPath(dir))
+	// 隧道占用检查：回收兜底除了空闲时长，还要看"还有没有任务绑着它"。
+	// 任务暂停/结束时没有占用，隧道按宽限期拆掉；任务再启动时 Ensure 会重建。
+	m.vpnMgr.SetActiveBindingCheck(m.hasActiveVPNBinding)
 	// 上次异常退出可能留下命名空间/iptables 规则；启动时清一遍，否则子网槽位
 	// 会被幽灵隧道占着（和 MCP 子进程泄漏同一个教训：谁起谁收）。
 	m.vpnMgr.CleanupStale()
@@ -2201,4 +2204,20 @@ LIMIT $1`, limit)
 		out = append(out, llmhunt.Target{Host: h, Source: "assets"})
 	}
 	return out, rows.Err()
+}
+
+// hasActiveVPNBinding 报告某 VPN profile 是否仍被**运行中**的任务绑定。
+// 任务暂停/结束（status != running）不算占用，其隧道到宽限期就回收。
+func (m *Manager) hasActiveVPNBinding(profileID int64) bool {
+	var n int
+	err := m.pg.QueryRow(`
+SELECT count(*) FROM tasks
+WHERE coalesce(egress,'') = $1
+  AND status IN ('running','created')`, fmt.Sprintf("vpn:%d", profileID)).Scan(&n)
+	if err != nil {
+		// 查不到就保守起见：当作有占用，不回收（宁可隧道多挂一会，也不能把正在
+		// 跑的任务的出口拆了）。
+		return true
+	}
+	return n > 0
 }
