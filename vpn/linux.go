@@ -93,7 +93,10 @@ func (m *Manager) bringUp(ctx context.Context, inst *instance) error {
 		return errors.New("未找到 sing-box，无法在隧道内提供 SOCKS 出口")
 	}
 
-	dir := filepath.Join(m.dir, fmt.Sprint(p.ID))
+	// 目录按**隧道键**而不是配置 id 分：同一个 .ovpn 会被不同项目用不同账号复用，
+	// 共用一个目录的话，后建的隧道会把前一条的 auth.txt 覆盖掉，于是两个任务
+	// 用着同一个账号出网（而且谁都看不出来）。
+	dir := filepath.Join(m.dir, tunnelDirName(p))
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("创建目录失败: %w", err)
 	}
@@ -435,6 +438,24 @@ func subnetOf(hostIP string) string {
 		return hostIP[:i] + ".0/24"
 	}
 	return hostIP
+}
+
+// tunnelDirName turns a tunnel key ("3|424789-4069") into a safe directory name.
+func tunnelDirName(p Profile) string {
+	key := p.Key
+	if key == "" {
+		key = fmt.Sprintf("profile%d", p.ID)
+	}
+	var b strings.Builder
+	for _, r := range key {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9', r == '-', r == '.':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('_')
+		}
+	}
+	return b.String()
 }
 
 func lastLines(s string, n int) string {
