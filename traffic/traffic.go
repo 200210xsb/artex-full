@@ -1854,6 +1854,54 @@ func (s *HostDeleteStage) Commit() error {
 // indexBytes is the index's real footprint on disk: the database plus its
 // write-ahead log and shared-memory file, since those are what an operator sees
 // the data directory holding.
+// PruneOlderThan deletes exchanges recorded before cutoff and hands the space
+// back to the filesystem.
+//
+// 流量录制没有天然上限：只要捕获开着，代理过的每个响应都会进索引与 blob 目录。
+// 曾经就是它把数据盘写满（7.7G），连带 PostgreSQL 掉进崩溃循环。所以保留期不是
+// "可选优化"，而是必须有的闸门。
+func (t *Traffic) PruneOlderThan(cutoff time.Time) (int64, error) {
+	if t == nil || t.db == nil {
+		return 0, nil
+	}
+	tx, err := t.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback() //nolint:errcheck
+	n, err := t.deleteWhere(tx, "ts > 0 AND ts < ?", cutoff.Unix())
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	if n > 0 {
+		t.reclaim()
+	}
+	return n, nil
+}
+
+// DiskBytes is the traffic store's total on-disk footprint (index + WAL + blobs).
+// Used by the disk guard to decide whether recording has outgrown its budget.
+func (t *Traffic) DiskBytes() int64 {
+	if t == nil {
+		return 0
+	}
+	total := t.indexBytes()
+	blobDir := filepath.Join(t.dir, "_blobs")
+	_ = filepath.WalkDir(blobDir, func(_ string, d fs.DirEntry, err error) error {
+		if err != nil || d == nil || d.IsDir() {
+			return nil
+		}
+		if info, ierr := d.Info(); ierr == nil {
+			total += info.Size()
+		}
+		return nil
+	})
+	return total
+}
+
 func (t *Traffic) indexBytes() int64 {
 	base := filepath.Join(t.dir, "_index", "index.sqlite")
 	var total int64

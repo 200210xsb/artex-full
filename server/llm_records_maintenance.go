@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"sync/atomic"
 	"time"
@@ -100,6 +101,10 @@ func (s *Server) sweepLLMRecords() {
 			log.Printf("[llm-records] 已回收表空间（原 %s，可用 %s）", humanBytes(size), humanBytes(free))
 		}
 	}
+	// 流量录制没有天然上限：捕获开着时，代理过的每个响应都会进索引与 blob。
+	// 这一项是"磁盘被写满"最可能的来源，所以按体积或磁盘水位主动裁旧。
+	s.sweepTraffic(free, total)
+
 	if total > 0 {
 		ratio := float64(free) / float64(total)
 		switch {
@@ -138,4 +143,49 @@ func vacuumLLMRecords(pg *pgdb.DB) error {
 	}
 	llmRecordsLastVacuum.Store(time.Now().Unix())
 	return nil
+}
+
+// 流量录制的保留预算：超过体积上限、或磁盘吃紧时，裁掉超期记录。
+const (
+	defaultTrafficRetentionDays = 3
+	defaultTrafficMaxGB         = 10
+	// diskTightRatio 是"开始主动清旧数据"的水位；比告警阈值更早动手，
+	// 免得等到 8% 才开始回收。
+	diskTightRatio = 0.12
+)
+
+// sweepTraffic 按保留期裁剪流量录制。
+func (s *Server) sweepTraffic(free, total int64) {
+	tr := s.m.traffic
+	if tr == nil {
+		return
+	}
+	size := tr.DiskBytes()
+	if size == 0 {
+		return
+	}
+	maxGB := s.m.pg.GetInt("traffic_max_gb", defaultTrafficMaxGB)
+	days := s.m.pg.GetInt("traffic_retention_days", defaultTrafficRetentionDays)
+	if days < 1 {
+		days = 1
+	}
+
+	tight := total > 0 && float64(free)/float64(total) < diskTightRatio
+	overBudget := maxGB > 0 && size > int64(maxGB)<<30
+	if !tight && !overBudget {
+		return
+	}
+
+	reason := "超过体积上限"
+	if tight {
+		reason = fmt.Sprintf("磁盘水位偏低（可用 %.1f%%）", float64(free)/float64(total)*100)
+	}
+	cutoff := time.Now().Add(-time.Duration(days) * 24 * time.Hour)
+	n, err := tr.PruneOlderThan(cutoff)
+	if err != nil {
+		log.Printf("[traffic] 裁剪超期录制失败: %v", err)
+		return
+	}
+	log.Printf("[traffic] %s，已裁剪 %d 条超过 %d 天的录制（录制体积 %s，磁盘可用 %s）",
+		reason, n, days, humanBytes(size), humanBytes(free))
 }

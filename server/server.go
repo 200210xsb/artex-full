@@ -3580,16 +3580,19 @@ func (s *Server) settingsPayload() map[string]any {
 		"llm_record_max_body_kb":     s.m.LLMRecordMaxBodyKB(),
 		"llm_record_store_raw":       s.m.LLMRecordStoreRaw(),
 		"llm_records_retention_days": s.m.LLMRecordsRetentionDays(),
-		"web_search_enabled":         on,
-		"web_search_backend":         backend,
-		"brave_key_set":              strings.TrimSpace(braveKey) != "",
-		"tavily_key_set":             strings.TrimSpace(tavilyKey) != "",
-		"web_search_proxy":           proxy,                       // 独立出口代理(http/https/socks5)，空=直连
-		"global_proxy":               s.m.GlobalProxy(),           // 全局出口代理(http/https/socks5)，所有目标流量走它，空=直连
-		"python_interpreter":         strings.TrimSpace(pyStored), // 用户/自动设的值(空=用运行时检测)
-		"workers":                    s.m.Workers(),               // 并发工作 agent 数(默认3)；对之后启动的任务生效
-		"task_concurrency_enabled":   concOn,                      // 任务并发上限开关(默认关)
-		"task_concurrency_limit":     concLimit,                   // 同时运行任务上限(开启后默认5)
+		// 流量录制的保留预算：超过体积或磁盘紧张时自动裁旧（避免把盘写满）。
+		"traffic_retention_days":   s.m.pg.GetInt("traffic_retention_days", 3),
+		"traffic_max_gb":           s.m.pg.GetInt("traffic_max_gb", 10),
+		"web_search_enabled":       on,
+		"web_search_backend":       backend,
+		"brave_key_set":            strings.TrimSpace(braveKey) != "",
+		"tavily_key_set":           strings.TrimSpace(tavilyKey) != "",
+		"web_search_proxy":         proxy,                       // 独立出口代理(http/https/socks5)，空=直连
+		"global_proxy":             s.m.GlobalProxy(),           // 全局出口代理(http/https/socks5)，所有目标流量走它，空=直连
+		"python_interpreter":       strings.TrimSpace(pyStored), // 用户/自动设的值(空=用运行时检测)
+		"workers":                  s.m.Workers(),               // 并发工作 agent 数(默认3)；对之后启动的任务生效
+		"task_concurrency_enabled": concOn,                      // 任务并发上限开关(默认关)
+		"task_concurrency_limit":   concLimit,                   // 同时运行任务上限(开启后默认5)
 		// LLM 轮询(故障转移)。默认关；开启后走全局激活配置的 agent 在当前配置不可用时
 		// 自动切到下一个配置。bind_fallback 仅在轮询开启时有意义(默认关)。
 		"llm_pool_enabled":       s.m.LLMPoolEnabled(),
@@ -3654,6 +3657,9 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		LLMRecordMaxBodyKB  *int  `json:"llm_record_max_body_kb"`     // 单条正文上限 KB（0=不截断）
 		LLMRecordStoreRaw   *bool `json:"llm_record_store_raw"`       // 是否额外存原始报文
 		LLMRecordsRetention *int  `json:"llm_records_retention_days"` // 保留天数（0=永久保留）
+		// 流量录制保留预算：超过 traffic_max_gb 或磁盘水位 <12% 时，裁掉超期录制。
+		TrafficRetention *int `json:"traffic_retention_days"`
+		TrafficMaxGB     *int `json:"traffic_max_gb"`
 		// Web search. WebSearchEnabled/Backend toggle the tool + backend; BraveKey/TavilyKey
 		// are optional — omit (null) to leave a stored key untouched, send "" to clear.
 		WebSearchEnabled *bool   `json:"web_search_enabled"`
@@ -3783,6 +3789,18 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.LLMRecordStoreRaw != nil {
 		if err := s.m.SetLLMRecordStoreRaw(*req.LLMRecordStoreRaw); err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+	}
+	if req.TrafficRetention != nil {
+		if err := s.m.pg.SetInt("traffic_retention_days", *req.TrafficRetention); err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+	}
+	if req.TrafficMaxGB != nil {
+		if err := s.m.pg.SetInt("traffic_max_gb", *req.TrafficMaxGB); err != nil {
 			writeErr(w, 500, err.Error())
 			return
 		}
