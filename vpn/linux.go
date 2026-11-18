@@ -79,7 +79,8 @@ func (m *Manager) CleanupStale() {
 					continue
 				}
 				del := strings.Replace(rule, "-A ", "-D ", 1)
-				_ = exec.Command("iptables", append(append([]string{"-t", table}, strings.Fields(del)...))...).Run()
+				args := append([]string{"-t", table}, strings.Fields(del)...)
+				_ = exec.Command("iptables", args...).Run()
 			}
 		}
 	}
@@ -153,6 +154,11 @@ func (m *Manager) bringUp(ctx context.Context, inst *instance) error {
 
 	logPath := filepath.Join(dir, "openvpn.log")
 	pidPath := filepath.Join(dir, "openvpn.pid")
+	// 必须在启动 openvpn 之前写好：`ip netns exec` 只在该命令启动时把
+	// /etc/netns/<ns>/resolv.conf bind mount 进命名空间。文件不存在时，命名空间里
+	// 的 /etc/resolv.conf 就是宿主机那一个 —— openvpn 的 dns-updown 脚本会直接改写
+	// 宿主机解析器（实测把两段 openvpn 的 DNS 追加进了宿主机的 resolv.conf）。
+	writeNetnsResolv(inst.netns, "", netnsFallbackDNS)
 	_ = os.Remove(pidPath)
 	if err := startOpenVPN(ctx, inst, cfgPath, logPath, pidPath); err != nil {
 		m.destroyNS(inst)
@@ -180,6 +186,11 @@ func (m *Manager) bringUp(ctx context.Context, inst *instance) error {
 	_ = runIP(inst.netns, "route", "replace", serverHost, "via", hostIP)
 	_ = runIP(inst.netns, "route", "del", "default", "via", hostIP)
 
+	// 命名空间的 DNS 必须用服务端推的：漏洞盒子推的是 192.168.192.1，只有走隧道
+	// 才可达。不写这份文件的话，netns 会沿用宿主机的解析器 —— 而它在隧道里根本
+	// 不可达，表现是"隧道已连接"但所有域名都解析失败。
+	writeNetnsResolv(inst.netns, logPath, nil)
+
 	if err := m.startSocks(inst, dir); err != nil {
 		m.destroyNS(inst)
 		m.freeSlot(slot)
@@ -193,11 +204,23 @@ func (m *Manager) bringUp(ctx context.Context, inst *instance) error {
 		return fmt.Errorf("隧道内 SOCKS 未就绪: %w", err)
 	}
 
-	ip, err := probeVia(addr, m.probeURL)
-	if err != nil {
+	// 数据通道刚建好时第一次探测可能落空（部分服务端先跑完 keepalive 才放行流量），
+	// 给它几次机会，别把"慢一拍"误判成"连不上"。
+	var ip string
+	var probeErr error
+	for attempt := 1; attempt <= 3; attempt++ {
+		ip, probeErr = probeVia(addr, m.probeURL)
+		if probeErr == nil && ip != "" {
+			break
+		}
+		if attempt < 3 {
+			time.Sleep(2 * time.Second)
+		}
+	}
+	if probeErr != nil || ip == "" {
 		m.destroyNS(inst)
 		m.freeSlot(slot)
-		return fmt.Errorf("出口探测失败: %w", err)
+		return fmt.Errorf("出口探测失败: %v", probeErr)
 	}
 	if want := strings.TrimSpace(p.ExpectEgress); want != "" && ip != want {
 		m.destroyNS(inst)
@@ -244,6 +267,9 @@ func (m *Manager) destroyNS(inst *instance) {
 	if inst.veth != "" {
 		_ = exec.Command("ip", "link", "del", inst.veth).Run()
 		inst.veth = ""
+	}
+	if inst.netns != "" {
+		_ = os.RemoveAll(filepath.Join("/etc/netns", inst.netns))
 	}
 	if inst.hostIP != "" && inst.extIface != "" {
 		netw := subnetOf(inst.hostIP)
@@ -321,6 +347,10 @@ func startOpenVPN(ctx context.Context, inst *instance, cfgPath, logPath, pidPath
 		"--config", cfgPath,
 		"--log", logPath,
 		"--writepid", pidPath,
+		// 关掉脚本执行：发行版会用 dns-updown 脚本按 push 的 dhcp-option 改
+		// /etc/resolv.conf，而命名空间里的那份不一定被隔离（见上面 writeNetnsResolv
+		// 的注释）。DNS 由我们写进 per-netns 文件，不需要脚本参与。
+		"--script-security", "0",
 		"--daemon",
 	}
 	cmd := exec.CommandContext(ctx, "ip", args...)
@@ -441,6 +471,70 @@ func subnetOf(hostIP string) string {
 		return hostIP[:i] + ".0/24"
 	}
 	return hostIP
+}
+
+// pushedDNS extracts the resolvers the server pushed in PUSH_REPLY.
+func pushedDNS(logPath string) []string {
+	data, err := os.ReadFile(logPath)
+	if err != nil {
+		return nil
+	}
+	var out []string
+	for _, line := range strings.Split(string(data), "\n") {
+		idx := strings.Index(line, "PUSH_REPLY")
+		if idx < 0 {
+			continue
+		}
+		for _, part := range strings.Split(line[idx:], ",") {
+			fields := strings.Fields(part)
+			// 形如 "dhcp-option DNS 114.114.114.114" / "dhcp-option DNS6 2400:3200::1"
+			if len(fields) >= 3 && fields[0] == "dhcp-option" &&
+				(strings.EqualFold(fields[1], "DNS") || strings.EqualFold(fields[1], "DNS6")) {
+				out = append(out, fields[2])
+			}
+		}
+	}
+	return out
+}
+
+// dedupDNS keeps the first occurrence of each resolver.
+func dedupDNS(in []string) []string {
+	seen := make(map[string]bool, len(in))
+	out := make([]string, 0, len(in))
+	for _, d := range in {
+		if d == "" || seen[d] {
+			continue
+		}
+		seen[d] = true
+		out = append(out, d)
+	}
+	return out
+}
+
+// netnsFallbackDNS 是公共兜底解析器（国内可达）。
+var netnsFallbackDNS = []string{"223.5.5.5", "119.29.29.29"}
+
+// writeNetnsResolv points the namespace at the pushed resolvers, falling back to
+// public ones when the server pushes none (some templates send no dhcp-option).
+func writeNetnsResolv(ns, logPath string, fallback []string) {
+	// 服务端推的解析器排前面（那是"从隧道里看"的 DNS），公共解析器兜底：某些线路推的
+	// 内网 DNS 在命名空间里其实不通，只有它的话整条隧道会表现为"连上了但域名全解析失败"。
+	dns := dedupDNS(append(pushedDNS(logPath), netnsFallbackDNS...))
+	if len(dns) == 0 {
+		dns = fallback
+	}
+	if len(dns) == 0 {
+		return
+	}
+	dir := filepath.Join("/etc/netns", ns)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return
+	}
+	var b strings.Builder
+	for _, d := range dns {
+		b.WriteString("nameserver " + d + "\n")
+	}
+	_ = os.WriteFile(filepath.Join(dir, "resolv.conf"), []byte(b.String()), 0o644)
 }
 
 // tunnelDirName turns a tunnel key ("3|424789-4069") into a safe directory name.
