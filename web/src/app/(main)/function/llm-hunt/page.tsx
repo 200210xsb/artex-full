@@ -215,7 +215,7 @@ export default function LLMHuntPage() {
   const shown = keys.filter((k) => (!provider || k.key_type === provider) && (!onlyVerified || k.verify_state === "valid"));
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col gap-4 p-1">
+    <div className="flex min-h-0 flex-1 flex-col gap-4">
       {/* 头部 */}
       <div className="flex flex-wrap items-center gap-2">
         <BrainIcon className="size-5 text-muted-foreground" />

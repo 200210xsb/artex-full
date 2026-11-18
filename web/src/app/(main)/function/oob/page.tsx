@@ -25,6 +25,8 @@ import {
   FileTextIcon,
   GlobeIcon,
   Loader2Icon,
+  PauseIcon,
+  PlayIcon,
   RadioIcon,
   RefreshCwIcon,
   ShieldAlertIcon,
@@ -285,23 +287,22 @@ export default function OOBPage() {
           ) : null}
         </div>
         <div className="flex items-center gap-3">
-          <div className="flex items-center gap-2 rounded-md border px-2.5 py-1">
-            <Switch
-              id="oob-auto"
-              size="sm"
-              checked={auto}
-              onCheckedChange={setAuto}
+          <Button
+            variant={auto ? "secondary" : "ghost"}
+            size="sm"
+            className="h-8"
+            onClick={() => setAuto((v) => !v)}
+            title={auto ? "点击暂停自动刷新" : "点击恢复自动刷新"}
+          >
+            {auto ? <PauseIcon className="size-3.5" /> : <PlayIcon className="size-3.5" />}
+            {auto ? `每 ${POLL_MS / 1000}s` : "已暂停"}
+          </Button>
+          {ov?.public_host ? (
+            <CopyButton
+              text={`${ov.public_host}${ov.ports?.length ? ":" + ov.ports[0] : ""}`}
+              label="复制回连地址"
             />
-            <label
-              htmlFor="oob-auto"
-              className={cn(
-                "cursor-pointer text-xs font-medium select-none",
-                auto ? "text-foreground" : "text-muted-foreground",
-              )}
-            >
-              {auto ? `每 ${POLL_MS / 1000}s 刷新` : "已暂停"}
-            </label>
-          </div>
+          ) : null}
           <Button variant="outline" size="sm" className="h-8" onClick={refreshNow} disabled={busy}>
             {busy ? <Loader2Icon className="size-3.5 animate-spin" /> : <RefreshCwIcon className="size-3.5" />}
             刷新
@@ -310,7 +311,7 @@ export default function OOBPage() {
       </div>
 
       {/* 概览条：监听端口与公网地址必须显式展示——载荷生成错了整个功能就废了 */}
-      <div className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-6">
+      <div className="grid grid-cols-2 gap-3 lg:grid-cols-3 2xl:grid-cols-6">
         <StatCard icon={<WifiIcon className="size-3.5" />} label="监听端口"
           value={ov?.ports?.length ? ov.ports.join(" / ") : "—"}
           hint="常驻监听器 oob-listen" mono />
