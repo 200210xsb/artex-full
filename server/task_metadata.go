@@ -21,8 +21,8 @@ const (
 // AgentKey 用 *string:显式传 null / "" 表示「解绑专项 agent」,与「未提供」不同,
 // 故另用顶层 key 集合判定存在性(见 decodeTaskMetadataRequest)。
 type taskMetadataRequest struct {
-	Name    *string `json:"name"`
-	Pinned  *bool   `json:"pinned"`
+	Name     *string `json:"name"`
+	Pinned   *bool   `json:"pinned"`
 	AgentKey *string `json:"agent_key"`
 }
 

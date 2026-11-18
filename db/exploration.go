@@ -2024,6 +2024,7 @@ func (s *ExplorationStore) AddStandaloneFinding(taskID, nodeID int64, vulnclass,
 // 的次数。prove_goal 用它区分两种完全不同的结论：
 //   - 「命令能执行」：一次 DBGp eval / 模板注入回显就够，活动里没有任何 Webshell 调用；
 //   - 「shell 已落地」：必然有一次 shell_add 登记，活动里留得下痕迹。
+//
 // 只有后者能满足「目标要求拿到 shell」。
 func (s *ExplorationStore) WebshellToolUsage() (int, error) {
 	if s == nil || s.db == nil {

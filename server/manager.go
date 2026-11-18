@@ -20,6 +20,7 @@ import (
 	"github.com/Autumn-27/artex/enrich"
 	"github.com/Autumn-27/artex/guard"
 	"github.com/Autumn-27/artex/intercept"
+	"github.com/Autumn-27/artex/llmhunt"
 	"github.com/Autumn-27/artex/llmrec"
 	"github.com/Autumn-27/artex/traffic"
 	"github.com/Autumn-27/artex/vpn"
@@ -438,6 +439,9 @@ func NewManager(dir, proxyAddr string) (*Manager, error) {
 	}
 	if err := pg.EnsureLLMUsageTable(); err != nil {
 		log.Printf("[llmusage] create table: %v", err)
+	}
+	if err := pg.EnsureLLMHuntTables(); err != nil {
+		log.Printf("[llmhunt] create tables: %v", err)
 	}
 	if err := pg.EnsureVPNTable(); err != nil {
 		log.Printf("[vpn] create table: %v", err)
@@ -2165,4 +2169,36 @@ func (t *Task) drainTriggers() []agent.TriggerEvent {
 	ev := t.pendingTriggers
 	t.pendingTriggers = nil
 	return ev
+}
+
+// llmHuntAssets 从资产库取候选主机（域名优先，其次 IP），最多 limit 个。
+//
+// 用资产库而不是扫公网：这些是平台里已经登记的资产，通常是授权范围内的；
+// 仍然只做只读探测，且目标数量受 limit 约束。
+func (m *Manager) llmHuntAssets(limit int) ([]llmhunt.Target, error) {
+	if limit <= 0 || limit > 2000 {
+		limit = 200
+	}
+	rows, err := m.pg.Query(`
+SELECT DISTINCT coalesce(nullif(domain,''), nullif(ip,'')) AS host
+FROM assets
+WHERE coalesce(nullif(domain,''), nullif(ip,'')) IS NOT NULL
+LIMIT $1`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []llmhunt.Target
+	for rows.Next() {
+		var h string
+		if err := rows.Scan(&h); err != nil {
+			continue
+		}
+		h = strings.TrimSpace(h)
+		if h == "" || strings.Contains(h, "*") {
+			continue
+		}
+		out = append(out, llmhunt.Target{Host: h, Source: "assets"})
+	}
+	return out, rows.Err()
 }

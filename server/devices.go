@@ -13,8 +13,8 @@ import (
 	"time"
 
 	"github.com/Autumn-27/artex/device"
-	"github.com/gorilla/websocket"
 	actool "github.com/Autumn-27/norma/tool"
+	"github.com/gorilla/websocket"
 	"github.com/skip2/go-qrcode"
 )
 
@@ -235,7 +235,7 @@ func (s *Server) pgDeviceBridgeInfo(w http.ResponseWriter, r *http.Request) {
 		"endpoint": endpoint,
 		"pair_url": pair,
 		"example":  "artex-device-agent --server '" + pair + "' --name <设备名>",
-		"hint": "设备端主动回连，手机无需开放端口；扫码拿到同一条 pair_url，agent 会把查询串里的 token 取出来用。",
+		"hint":     "设备端主动回连，手机无需开放端口；扫码拿到同一条 pair_url，agent 会把查询串里的 token 取出来用。",
 	})
 }
 

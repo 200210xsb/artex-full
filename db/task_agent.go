@@ -88,6 +88,7 @@ ORDER BY name, key`)
 // NormalizeTaskAgentKey 归一化并校验 agent_key。
 //   - 空串/纯空白 => ("", nil):表示「不绑定专项 agent」,调用方按默认行为处理。
 //   - 超过 MaxTaskAgentKeyRunes 或字符集不合法 => ErrTaskAgentInvalid。
+//
 // 字符集与 agents.key 的数据库约束保持一致:小写字母开头,后接小写字母/数字/下划线。
 func NormalizeTaskAgentKey(key string) (string, error) {
 	trimmed := strings.TrimSpace(key)

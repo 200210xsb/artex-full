@@ -82,6 +82,8 @@ export const sidebarItems: NavGroup[] = [
       { id: "nuclei", title: "Nuclei", url: "/function/nuclei", icon: Radar },
       { id: "oob", title: "回连监听", url: "/function/oob", icon: Radio },
       { id: "llm-records", title: "LLM 录制", url: "/function/llm-records", icon: Radio },
+      // 大模型测绘：暴露的推理/编排服务 + 泄露密钥
+      { id: "llm-hunt", title: "大模型测绘", url: "/function/llm-hunt", icon: Brain },
       { id: "assets", title: "资产", url: "/function/assets", icon: Network },
       { id: "sync", title: "资产同步", url: "/function/sync", icon: FolderSync },
       { id: "workspace", title: "工作空间", url: "/function/workspace", icon: FolderOpen },

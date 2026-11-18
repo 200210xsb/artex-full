@@ -78,9 +78,9 @@ func TestWebshellValidateProxy(t *testing.T) {
 		}
 	}
 	bad := []string{
-		"socks4://h:1080",  // 协议不支持
-		"127.0.0.1:1080",   // 缺协议
-		"http://",          // 缺主机
+		"socks4://h:1080", // 协议不支持
+		"127.0.0.1:1080",  // 缺协议
+		"http://",         // 缺主机
 		"http://h:8080, ::",
 	}
 	for _, p := range bad {

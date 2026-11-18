@@ -23,6 +23,7 @@ import (
 	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/artex/device"
 	"github.com/Autumn-27/artex/intercept"
+	"github.com/Autumn-27/artex/llmhunt"
 	"github.com/Autumn-27/artex/llmpool"
 	"github.com/Autumn-27/artex/llmrec"
 	"github.com/Autumn-27/artex/report"
@@ -40,9 +41,11 @@ var BuildVersion = "dev"
 // Server exposes the ARTEX backend over a JSON HTTP API for the shadcn/ui
 // frontend.
 type Server struct {
-	m      *Manager
-	engine *Engine
-	ctx    context.Context
+	// llmHunt 是"大模型资产测绘"的扫描器（进程内单例，同一时刻只允许一次扫描）。
+	llmHunt *llmhunt.Scanner
+	m       *Manager
+	engine  *Engine
+	ctx     context.Context
 
 	skillDir string // root directory for skill subdirectories
 	jwtKey   []byte // HS256 signing key loaded from / generated into dataDir/jwt.key
@@ -830,6 +833,16 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/llm/records/tasks", s.pgLLMTasks)
 	mux.HandleFunc("GET /api/llm/records/by-model", s.pgTokenByModel) // 按模型聚合本任务 token 用量
 	mux.HandleFunc("GET /api/llm/records/{id}", s.pgGetLLMRecord)
+	// 大模型资产与密钥测绘
+	mux.HandleFunc("POST /api/llmhunt/scan", s.llmHuntScan)
+	mux.HandleFunc("POST /api/llmhunt/stop", s.llmHuntStop)
+	mux.HandleFunc("GET /api/llmhunt/status", s.llmHuntStatus)
+	mux.HandleFunc("GET /api/llmhunt/assets", s.llmHuntAssets)
+	mux.HandleFunc("GET /api/llmhunt/keys", s.llmHuntKeys)
+	mux.HandleFunc("GET /api/llmhunt/keys/{id}/reveal", s.llmHuntReveal)
+	mux.HandleFunc("DELETE /api/llmhunt/keys/{id}", s.llmHuntDeleteKey)
+	mux.HandleFunc("DELETE /api/llmhunt/assets/{id}", s.llmHuntDeleteAsset)
+	mux.HandleFunc("GET /llmhunt", s.llmHuntPage)
 	mux.HandleFunc("GET /api/vpn", s.listVPNProfiles)
 	mux.HandleFunc("POST /api/vpn", s.saveVPNProfile)
 	mux.HandleFunc("DELETE /api/vpn/{id}", s.deleteVPNProfile)
