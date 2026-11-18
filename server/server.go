@@ -1942,6 +1942,14 @@ func (s *Server) seed(t *Task, text string) {
 		log.Printf("[seed] task %s: 目标 %q 是 LLM 网关，拒绝作为渗透目标", t.ID, host)
 		return
 	}
+	// 回环/链路本地/组播永远不是渗透目标。规范类模板里常拿云元数据地址举例
+	// （「云元数据地址（169.254.169.254 等）证明可达即可」），种子解析会把示例当成
+	// 真目标建成资产并挂到任务上 —— 实际发生过：task 529 的范围里多出一个
+	// 169.254.169.254。私有网段仍允许（内网测试是正常场景）。
+	if ip := net.ParseIP(host); ip != nil && isNeverTargetIP(ip) {
+		log.Printf("[seed] task %s: 目标 %q 属于非目标地址段（回环/链路本地/组播），拒绝作为渗透目标", t.ID, host)
+		return
+	}
 
 	u := scheme + "://" + host
 	if !(scheme == "https" && port == 443) && !(scheme == "http" && port == 80) {
@@ -1972,6 +1980,14 @@ func (s *Server) seed(t *Task, text string) {
 	// 不在这里 Notify:首轮是否触发统一由 engine.Run 的 HasActiveIntent 决定(种子意图任务
 	// 跳过首轮)。seed 早于 Run 执行,若在此 Notify 会 buffered 到通道、被 plannerLoop 启动时
 	// 消费掉而绕过 Run 的门控 → 种子任务仍误触发首轮。
+}
+
+// isNeverTargetIP reports whether an address can never be a legitimate engagement
+// target: loopback, link-local (incl. the cloud metadata address 169.254.169.254),
+// multicast, unspecified. Private ranges are intentionally NOT included.
+func isNeverTargetIP(ip net.IP) bool {
+	return ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
+		ip.IsMulticast() || ip.IsUnspecified()
 }
 
 // seedFirstIntent writes ONE open intent (summary = 描述+目标) into the task's
