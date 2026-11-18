@@ -78,6 +78,9 @@ import type {
   NucleiFingerprintResponse,
   NucleiMatchResponse,
   NucleiRunInput,
+  VPNListResponse,
+  VPNProfile,
+  VPNTunnelStatus,
   NucleiRunResponse,
   NucleiSearchResponse,
   NucleiStats,
@@ -853,6 +856,30 @@ export const api = {
   // Purges every exchange and compacts the index; `reclaimed` is the bytes of
   // index handed back to the filesystem. Evidence bound to findings is kept.
   trafficDeleteAll: () => del<{ deleted: number; reclaimed: number }>(`/traffic/all`),
+
+  // ---- VPN 出口（OpenVPN）----
+  vpnList: () => get<VPNListResponse>(`/vpn`),
+  // 保存配置（.ovpn 原文 + 账号）。返回 id。
+  saveVPN: (p: {
+    id?: number;
+    name: string;
+    ovpn?: string;
+    username?: string;
+    password?: string;
+    expect_egress?: string;
+    enabled?: boolean;
+  }) => post<{ id: number }>(`/vpn`, p),
+  deleteVPN: (id: number) => del<{ deleted: number }>(`/vpn/${id}`),
+  // 建链并返回实测出口 IP；username 为空时用配置上的默认账号。
+  startVPN: (id: number, username?: string, password?: string) =>
+    post<{ socks: string; status: VPNTunnelStatus }>(`/vpn/${id}/start`, { username, password }),
+  stopVPN: (id: number) => post<{ tunnels: VPNTunnelStatus[] }>(`/vpn/${id}/stop`, {}),
+  // 绑定任务出口（含该项目账号）。密码留空=沿用已存的。
+  setTaskEgress: (taskId: string, p: { egress: string; username?: string; password?: string }) =>
+    put<{ id: number; egress: string; username: string; status?: VPNTunnelStatus }>(
+      `/tasks/${encodeURIComponent(taskId)}/egress`,
+      p,
+    ),
 
   // ---- app settings (runtime toggles) ----
   settings: () => get<Settings>(`/settings`),

@@ -141,7 +141,9 @@ import type {
   TaskArchiveState,
   TaskCategory,
   TaskStatus,
+  VPNProfile,
 } from "@/lib/types";
+import { EgressPicker } from "@/components/vpn-egress-panel";
 import { cn } from "@/lib/utils";
 
 // fmtBytes renders a human file size for the upload manifest.
@@ -3111,6 +3113,11 @@ function CreateTaskSheet({
   const [sourceTaskIDs, setSourceTaskIDs] = React.useState<string[]>([]);
   const [companyIDs, setCompanyIDs] = React.useState<number[]>([]);
   const [llmProfileIDs, setLLMProfileIDs] = React.useState<string[]>([]);
+  // 出口：""=平台默认；"vpn:<id>"=该 OpenVPN。账号密码按项目填（每期不同）。
+  const [egress, setEgress] = React.useState("");
+  const [egressUser, setEgressUser] = React.useState("");
+  const [egressPass, setEgressPass] = React.useState("");
+  const [vpnProfiles, setVpnProfiles] = React.useState<VPNProfile[]>([]);
   const [creating, setCreating] = React.useState(false);
   const [timeoutMin, setTimeoutMin] = React.useState(""); // 任务级超时(分钟);空/0 = 不限时
   const [heartbeatMin, setHeartbeatMin] = React.useState("10"); // planner 心跳(分钟);默认10,下限10(与后端一致)
@@ -3128,6 +3135,7 @@ function CreateTaskSheet({
 
   // load LLM profiles once for the create-task profile picker.
   React.useEffect(() => {
+    api.vpnList().then((r) => setVpnProfiles(r.profiles ?? [])).catch(() => {});
     api
       .llmProfiles()
       .then(setProfiles)
@@ -3204,6 +3212,9 @@ function CreateTaskSheet({
           .map((r) => ({ ...r, pattern: r.pattern.trim() }))
           .filter((r) => r.pattern !== ""),
         agentKey, // 专项 agent;空=不绑定
+        egress,
+        vpnUsername: egressUser,
+        vpnPassword: egressPass,
       });
       toast.success("任务已创建");
       setName("");
@@ -3214,6 +3225,9 @@ function CreateTaskSheet({
       setSourceTaskIDs([]);
       setCompanyIDs([]);
       setLLMProfileIDs([]);
+      setEgress("");
+      setEgressUser("");
+      setEgressPass("");
       setTimeoutMin("");
       setHeartbeatMin("10");
       setSeedFirstIntent(false);
@@ -3408,6 +3422,24 @@ function CreateTaskSheet({
                 portalContainer={sheetContentRef}
               />
               <FieldDescription>按列表顺序故障转移；第一项为当前配置，仅在明确额度不足时切换下一项。</FieldDescription>
+            </Field>
+            <Field>
+              <FieldLabel htmlFor="task-egress">出口</FieldLabel>
+              <EgressPicker
+                profiles={vpnProfiles}
+                egress={egress}
+                username={egressUser}
+                password={egressPass}
+                onChange={(v) => {
+                  setEgress(v.egress);
+                  setEgressUser(v.username);
+                  setEgressPass(v.password);
+                }}
+              />
+              <FieldDescription>
+                选 VPN 时，该任务的出网流量走这条隧道；隧道断开会被阻断，不会回落直连。
+                账号密码是平台按项目发的，每期不同，所以填在这里而不是出口配置里。
+              </FieldDescription>
             </Field>
 
             {/* 高级参数默认折叠:超时/心跳/首个意图,展开才占空间,常用路径保持清爽。 */}

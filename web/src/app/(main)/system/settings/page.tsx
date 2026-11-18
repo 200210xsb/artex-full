@@ -16,6 +16,7 @@ import { CHAT_SEND_MODE_OPTIONS, type ChatSendMode, setChatSendMode, useChatSend
 import type { Settings } from "@/lib/types";
 
 import { UpdateCard } from "./_components/update-card";
+import { VpnEgressPanel } from "@/components/vpn-egress-panel";
 
 export default function SystemSettingsPage() {
   const [trafficCapture, setTrafficCapture] = React.useState(false);
@@ -363,6 +364,11 @@ export default function SystemSettingsPage() {
             </p>
           </CardContent>
         </Card>
+
+        {/* VPN 出口：按任务绑定的 OpenVPN 隧道（平台按项目发账号） */}
+        <div className="mb-4 break-inside-avoid md:mb-6">
+          <VpnEgressPanel />
+        </div>
 
         <Card className="mb-4 break-inside-avoid md:mb-6">
           <CardHeader>

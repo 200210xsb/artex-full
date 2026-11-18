@@ -2166,3 +2166,36 @@ export interface OOBPayloadsResponse {
   payloads: OOBPayload[];
   warning?: string;
 }
+
+// ---- VPN 出口（OpenVPN）----
+// 平台按项目发一套账号，所以凭据跟着任务走；配置（.ovpn）是共用的。
+export interface VPNProfile {
+  id: number;
+  name: string;
+  ovpn?: string;
+  username: string;
+  password_set: boolean;
+  expect_egress: string;
+  enabled: boolean;
+  status: VPNTunnelStatus;
+}
+
+export interface VPNTunnelStatus {
+  key?: string;
+  id?: number;
+  name?: string;
+  username?: string;
+  state: "stopped" | "starting" | "up" | "error" | "";
+  socks_addr?: string;
+  egress_ip?: string;   // 实测出口 IP
+  expect_egress?: string;
+  notes?: string[];     // 本次建链应用的配置修正
+  last_error?: string;
+  since?: string;
+}
+
+export interface VPNListResponse {
+  profiles: VPNProfile[];
+  tunnels: VPNTunnelStatus[];
+  supported: boolean;
+}

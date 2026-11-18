@@ -53,6 +53,11 @@ export interface CreateTaskWithAgentInput {
   interceptRules?: AssetInterceptRuleInput[];
   // agentKey:专项 agent 的 key;空/省略=不绑定(默认,行为与从前一致)。
   agentKey?: string;
+  // 出口绑定：""=平台全局出口；"vpn:<id>"=走该 OpenVPN 隧道。
+  // 凭据跟着任务走：平台按项目（每期）发账号，同一个 .ovpn 会被不同项目复用。
+  egress?: string;
+  vpnUsername?: string;
+  vpnPassword?: string;
 }
 
 // createTaskWithAgent 创建任务并可携带专项 agent。
@@ -73,6 +78,9 @@ export async function createTaskWithAgent(input: CreateTaskWithAgentInput): Prom
       coverage_enabled: input.coverageEnabled ?? true, // 默认开;false=关闭资产覆盖度功能
       intercept_rules: input.interceptRules ?? [], // 任务级资产拦截规则
       agent_key: input.agentKey || null, // null=不绑定专项 agent
+      egress: input.egress || "",        // ""=平台全局出口；vpn:<id>=该 VPN
+      vpn_username: input.vpnUsername || "",
+      vpn_password: input.vpnPassword || "",
     }),
   });
 }

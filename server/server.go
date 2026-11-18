@@ -830,6 +830,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/llm/records/tasks", s.pgLLMTasks)
 	mux.HandleFunc("GET /api/llm/records/by-model", s.pgTokenByModel) // 按模型聚合本任务 token 用量
 	mux.HandleFunc("GET /api/llm/records/{id}", s.pgGetLLMRecord)
+	mux.HandleFunc("GET /api/vpn", s.listVPNProfiles)
+	mux.HandleFunc("POST /api/vpn", s.saveVPNProfile)
+	mux.HandleFunc("DELETE /api/vpn/{id}", s.deleteVPNProfile)
+	mux.HandleFunc("POST /api/vpn/{id}/start", s.startVPNProfile)
+	mux.HandleFunc("POST /api/vpn/{id}/stop", s.stopVPNProfile)
+	mux.HandleFunc("PUT /api/tasks/{id}/egress", s.setTaskEgress)
 	mux.HandleFunc("GET /api/settings", s.getSettings)
 	mux.HandleFunc("PUT /api/settings", s.putSettings)
 	// 漏洞 IM 推送。渠道是「多实例 + 各自过滤规则」的资源，因此独立成一组
@@ -1134,6 +1140,8 @@ func (s *Server) listTasks(w http.ResponseWriter, r *http.Request) {
 	dtos := make([]TaskDTO, 0, len(list))
 	for _, t := range list {
 		dto := taskDTO(t, s.resolvedTaskStatus(t))
+		s.fillTaskEgress(&dto)
+		s.fillTaskEgress(&dto)
 		applyTaskArchiveBlocker(&dto, archiveBlockers)
 		metric := metrics[t.ExpID]
 		dto.Tokens = tokenTotalDTO(metric.Tokens)
@@ -1533,10 +1541,14 @@ func truncateReply(s string) string {
 }
 
 type createTaskReq struct {
-	Name                 string   `json:"name,omitempty"` // 可选任务名称;省略/空=未命名
-	CategoryID           *int64   `json:"category_id,omitempty"`
-	Description          string   `json:"description"`
-	Goal                 string   `json:"goal"`
+	Name        string `json:"name,omitempty"` // 可选任务名称;省略/空=未命名
+	CategoryID  *int64 `json:"category_id,omitempty"`
+	Description string `json:"description"`
+	Goal        string `json:"goal"`
+	Egress      string `json:"egress,omitempty"` // 任务出口：'' / global / vpn:<id>
+	// 该项目的 VPN 账号（平台按项目发凭据，同一个 .ovpn 会被不同项目复用）。
+	VPNUsername          string   `json:"vpn_username,omitempty"`
+	VPNPassword          string   `json:"vpn_password,omitempty"`
 	LLMProfileID         *int64   `json:"llm_profile_id,omitempty"`    // 指定运行本任务的 LLM 配置;省略/null=用激活配置
 	LLMProfileIDs        []int64  `json:"llm_profile_ids,omitempty"`   // 有序任务级配置链;第一项初始生效
 	SourceTaskIDs        []string `json:"source_task_ids,omitempty"`   // 仅直接、只读继承的来源任务
@@ -1663,6 +1675,28 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 		}
 		writeErr(w, 500, err.Error())
 		return
+	}
+	// 出口绑定在建任务时就落下：之后建 agent 会读它决定走哪条隧道。
+	if egress := strings.TrimSpace(req.Egress); egress != "" && egress != "global" {
+		vpnID, ok := vpnProfileID(egress)
+		if !ok {
+			writeErr(w, 400, "出口格式应为 vpn:<id>")
+			return
+		}
+		if prof, err := s.m.pg.VPNProfileByID(vpnID); err != nil || prof == nil {
+			writeErr(w, 400, "出口不存在")
+			return
+		}
+		if id, err := strconv.ParseInt(t.ID, 10, 64); err == nil {
+			binding := db.TaskEgress{
+				Egress:   egress,
+				Username: strings.TrimSpace(req.VPNUsername),
+				Password: req.VPNPassword,
+			}
+			if err := s.m.pg.SetTaskEgress(id, binding); err != nil {
+				log.Printf("[vpn] 任务 %s 写出口失败: %v", t.ID, err)
+			}
+		}
 	}
 	log.Printf("[task] 新建任务 #%s «%s» 目标: %s", t.ID, req.Description, req.Goal)
 	// 共享的建后流程(seed + 种子意图 + 后台目标分解 + engine.Run),与 spawn_task 复用同一段。

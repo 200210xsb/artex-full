@@ -64,6 +64,12 @@ type TaskDTO struct {
 	// AgentKey 是本任务绑定的【专项 agent】(agents.key);空=不绑定(默认,任务继续用
 	// 系统内置 agent 集)。前端据此显示「用了哪个专项 agent」。
 	AgentKey string `json:"agent_key,omitempty"`
+	// 出口绑定与其实时状态：界面要能直接看到"这个任务从哪个 IP 出去"。
+	Egress      string `json:"egress,omitempty"`
+	EgressLabel string `json:"egress_label,omitempty"`
+	VPNUsername string `json:"vpn_username,omitempty"`
+	EgressIP    string `json:"egress_ip,omitempty"`
+	EgressState string `json:"egress_state,omitempty"`
 }
 
 // FindingSeverityDTO 是任务列表里按严重度分档的漏洞计数（严重/高/中/低）。

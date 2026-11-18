@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -21,6 +22,7 @@ import (
 	"github.com/Autumn-27/artex/intercept"
 	"github.com/Autumn-27/artex/llmrec"
 	"github.com/Autumn-27/artex/traffic"
+	"github.com/Autumn-27/artex/vpn"
 	actool "github.com/Autumn-27/norma/tool"
 )
 
@@ -279,11 +281,12 @@ type Manager struct {
 	mu              sync.RWMutex
 	tasks           map[string]*Task
 	active          string
-	trafficOn       bool // 流量捕获开关（默认关；settings.traffic_capture）
-	llmRecOn        bool // LLM 录制开关（默认关；settings.llm_record）
-	llmRecStoreRaw  bool // 是否额外存原始报文（默认关；settings.llm_record_store_raw）
-	llmRecRetention int  // 调用记录保留天数（默认 3；0=永久保留；settings.llm_records_retention_days）
-	llmRecMaxBodyKB int  // 单条正文保留上限 KB（默认 16；settings.llm_record_max_body_kb）
+	trafficOn       bool         // 流量捕获开关（默认关；settings.traffic_capture）
+	vpnMgr          *vpn.Manager // 按任务绑定的 OpenVPN 出口（每条一条独立隧道）
+	llmRecOn        bool         // LLM 录制开关（默认关；settings.llm_record）
+	llmRecStoreRaw  bool         // 是否额外存原始报文（默认关；settings.llm_record_store_raw）
+	llmRecRetention int          // 调用记录保留天数（默认 3；0=永久保留；settings.llm_records_retention_days）
+	llmRecMaxBodyKB int          // 单条正文保留上限 KB（默认 16；settings.llm_record_max_body_kb）
 	// 联网搜索开关与来源（默认关；settings.web_search_*）。brave-free 需要 braveKey；tavily 需要 tavilyKey。
 	// webSearchProxy 是独立出口代理(http/https/socks5)，与记录流量的 MITM 代理无关。
 	webSearchOn      bool
@@ -436,7 +439,14 @@ func NewManager(dir, proxyAddr string) (*Manager, error) {
 	if err := pg.EnsureLLMUsageTable(); err != nil {
 		log.Printf("[llmusage] create table: %v", err)
 	}
+	if err := pg.EnsureVPNTable(); err != nil {
+		log.Printf("[vpn] create table: %v", err)
+	}
 	m := &Manager{dir: dir, pg: pg, assets: pg.Assets(), tasks: map[string]*Task{}, interceptor: intercept.New(pg)}
+	m.vpnMgr = vpn.New(filepath.Join(dir, "vpn"), singBoxBinPath(dir))
+	// 上次异常退出可能留下命名空间/iptables 规则；启动时清一遍，否则子网槽位
+	// 会被幽灵隧道占着（和 MCP 子进程泄漏同一个教训：谁起谁收）。
+	m.vpnMgr.CleanupStale()
 	if proxyAddr != "" {
 		tr, err := traffic.Open(filepath.Join(dir, "traffic"), proxyAddr)
 		if err != nil {
@@ -912,6 +922,84 @@ func (m *Manager) ProxyCACert() string {
 	return m.traffic.CACertPath()
 }
 
+// failClosedProxy 是"出口本该有、但没建起来"时返回的地址：连不上、不会把流量
+// 泄漏到直连。空串在 HTTP_PROXY 语义里等于直连，所以绝不能拿它做失败值。
+const failClosedProxy = "socks5://127.0.0.1:9"
+
+// ProxyAddrFor returns the egress proxy a specific task must use.
+//
+// Tasks bound to a VPN profile get that tunnel's SOCKS endpoint; everything else
+// keeps the platform-wide egress. When a bound tunnel cannot be established the
+// result is a dead address on purpose: falling back to direct traffic would put
+// the engagement's requests outside the address range the platform expects.
+func (m *Manager) ProxyAddrFor(taskID int64) string {
+	if m.vpnMgr == nil || taskID == 0 {
+		return m.ProxyAddr()
+	}
+	binding, err := m.pg.TaskEgressOf(taskID)
+	if err != nil {
+		log.Printf("[vpn] 读取任务 %d 出口失败: %v", taskID, err)
+		return m.ProxyAddr()
+	}
+	id, ok := vpnProfileID(binding.Egress)
+	if !ok {
+		return m.ProxyAddr()
+	}
+	prof, err := m.pg.VPNProfileByID(id)
+	if err != nil || prof == nil {
+		log.Printf("[vpn] 任务 %d 绑定的出口 %s 不存在，拒绝直连", taskID, binding.Egress)
+		return failClosedProxy
+	}
+	if !prof.Enabled {
+		log.Printf("[vpn] 任务 %d 绑定的出口 %s 已禁用，拒绝直连", taskID, prof.Name)
+		return failClosedProxy
+	}
+	// 凭据以任务上的为准：平台按项目发账号，同一个 .ovpn 会被不同项目复用。
+	// 任务没填就退回配置上的默认账号。
+	user, pass := binding.Username, binding.Password
+	if user == "" {
+		user, pass = prof.Username, prof.Password
+	}
+	if user == "" {
+		log.Printf("[vpn] 任务 %d 的出口 %s 没有账号，拒绝直连", taskID, prof.Name)
+		return failClosedProxy
+	}
+	// 建链可能要几秒；这里同步等待，因为拿不到确定出口就不该开始跑任务。
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	url, err := m.vpnMgr.Ensure(ctx, vpn.Profile{
+		Key: vpnTunnelKey(prof.ID, user),
+		ID:  prof.ID, Name: prof.Name, Raw: prof.OVPN,
+		Username: user, Password: pass,
+		ExpectEgress: prof.ExpectEgress,
+	})
+	if err != nil {
+		log.Printf("[vpn] 任务 %d 的出口 %s 建链失败（该任务流量被阻断，不回落直连）: %v", taskID, prof.Name, err)
+		return failClosedProxy
+	}
+	return url
+}
+
+// vpnTunnelKey identifies a tunnel: one account per project, so the same .ovpn
+// with two accounts must not share a namespace (traffic would leave from the
+// wrong project's address).
+func vpnTunnelKey(profileID int64, username string) string {
+	return fmt.Sprintf("%d|%s", profileID, strings.TrimSpace(username))
+}
+
+// vpnProfileID parses an egress binding of the form "vpn:<id>".
+func vpnProfileID(egress string) (int64, bool) {
+	val := strings.TrimSpace(egress)
+	if !strings.HasPrefix(val, "vpn:") {
+		return 0, false
+	}
+	id, err := strconv.ParseInt(strings.TrimPrefix(val, "vpn:"), 10, 64)
+	if err != nil || id <= 0 {
+		return 0, false
+	}
+	return id, true
+}
+
 // GlobalProxy returns the configured global egress proxy URL (empty = direct).
 func (m *Manager) GlobalProxy() string {
 	m.mu.RLock()
@@ -985,6 +1073,11 @@ func (m *Manager) SetEgressRules(direct, proxy string) error {
 }
 
 func (m *Manager) Close() error {
+	// 先停隧道（会删命名空间、回收子网），再关数据库：隧道子进程还活着时关库，
+	// 它们会往一个已关闭的连接上写日志。
+	if m.vpnMgr != nil {
+		m.vpnMgr.Close()
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.traffic != nil {
