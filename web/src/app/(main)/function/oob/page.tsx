@@ -286,7 +286,7 @@ export default function OOBPage() {
             </Badge>
           ) : null}
         </div>
-        <div className="flex items-center gap-3">
+        <div className="ml-4 flex items-center gap-2">
           <Button
             variant={auto ? "secondary" : "ghost"}
             size="sm"
@@ -311,20 +311,20 @@ export default function OOBPage() {
       </div>
 
       {/* 概览条：监听端口与公网地址必须显式展示——载荷生成错了整个功能就废了 */}
-      <div className="grid grid-cols-2 gap-3 lg:grid-cols-3 2xl:grid-cols-6">
+      <div className="flex flex-wrap items-stretch gap-3">
         <StatCard icon={<WifiIcon className="size-3.5" />} label="监听端口"
           value={ov?.ports?.length ? ov.ports.join(" / ") : "—"}
           hint="常驻监听器 oob-listen" mono />
         <StatCard icon={<GlobeIcon className="size-3.5" />} label="回连地址"
           value={ov?.public_host || "未配置"} hint="目标要访问的公网 IP" mono
           tone={ov && !ov.public_host ? "warn" : undefined} />
-        <StatCard icon={<ActivityIcon className="size-3.5" />} label="会话 / 活跃"
+        <StatCard icon={<ActivityIcon className="size-3.5" />} label="会话 / 活跃" weight={1.6}
           value={`${ov?.sessions ?? 0} / ${ov?.active ?? 0}`} hint="累计 / 未关闭" />
-        <StatCard icon={<ZapIcon className="size-3.5" />} label="回连总数"
+        <StatCard icon={<ZapIcon className="size-3.5" />} label="回连总数" weight={1.3}
           value={String(ov?.hits ?? 0)} hint="所有会话累计" />
-        <StatCard icon={<ClockIcon className="size-3.5" />} label="今日回连"
+        <StatCard icon={<ClockIcon className="size-3.5" />} label="今日回连" weight={0.8}
           value={String(ov?.hits_today ?? 0)} hint={ov?.last_hit ? `最近 ${fmtAgo(ov.last_hit)}` : "暂无"} />
-        <StatCard icon={<FileTextIcon className="size-3.5" />} label="库大小"
+        <StatCard icon={<FileTextIcon className="size-3.5" />} label="库大小" weight={0.8}
           value={fmtBytes(ov?.db_bytes)} hint="7 天自动清理" />
       </div>
 
@@ -347,10 +347,25 @@ export default function OOBPage() {
         </Card>
       ) : (
         <Tabs value={tab} onValueChange={setTab} className="flex min-h-0 flex-1 flex-col gap-3">
-          <TabsList className="w-fit">
-            <TabsTrigger value="ledger">回连台账</TabsTrigger>
-            <TabsTrigger value="capability">能力判定</TabsTrigger>
-            <TabsTrigger value="payloads">投喂载荷</TabsTrigger>
+          <TabsList className="mb-2 w-full justify-start gap-1 rounded-none border-b bg-transparent p-0">
+            <TabsTrigger
+              value="ledger"
+              className="rounded-none border-b-2 border-transparent px-3 pb-2.5 text-muted-foreground shadow-none data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:text-primary data-[state=active]:font-semibold data-[state=active]:shadow-none"
+            >
+              回连台账
+            </TabsTrigger>
+            <TabsTrigger
+              value="capability"
+              className="rounded-none border-b-2 border-transparent px-3 pb-2.5 text-muted-foreground shadow-none data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:text-primary data-[state=active]:font-semibold data-[state=active]:shadow-none"
+            >
+              能力判定
+            </TabsTrigger>
+            <TabsTrigger
+              value="payloads"
+              className="rounded-none border-b-2 border-transparent px-3 pb-2.5 text-muted-foreground shadow-none data-[state=active]:border-primary data-[state=active]:bg-transparent data-[state=active]:text-primary data-[state=active]:font-semibold data-[state=active]:shadow-none"
+            >
+              投喂载荷
+            </TabsTrigger>
           </TabsList>
 
           {/* ---------- 台账：左会话 右命中流 ---------- */}
@@ -375,13 +390,13 @@ export default function OOBPage() {
                             type="button"
                             onClick={() => setSid(s.id)}
                             className={cn(
-                              "flex w-full flex-col gap-1 px-3 py-2.5 text-left transition-colors hover:bg-muted/60",
-                              s.id === sid && "bg-muted",
+                              "flex w-full flex-col gap-1.5 px-3 py-3 text-left transition-colors hover:bg-muted/60",
+                              s.id === sid && "bg-primary/10 ring-1 ring-primary/25 ring-inset",
                             )}
                           >
-                            <div className="flex items-center gap-1.5">
+                            <div className="flex items-center gap-2">
                               <LevelBadge level={s.level} name={s.level_name} />
-                              <span className="truncate text-xs font-medium">
+                              <span className="min-w-0 flex-1 truncate text-xs font-medium" title={s.label || s.id}>
                                 {s.label || s.id}
                               </span>
                               <span className="ml-auto shrink-0 font-mono text-[10px] tabular-nums text-muted-foreground">
@@ -416,8 +431,8 @@ export default function OOBPage() {
 
               <div className="flex min-h-0 flex-col gap-4">
                 <Card className="flex min-h-0 flex-1 flex-col overflow-hidden">
-                  <CardHeader className="pb-2">
-                    <div className="flex items-center justify-between gap-2">
+                  <CardHeader className="pb-3">
+                    <div className="flex items-center justify-between gap-3">
                       <div className="min-w-0">
                         <CardTitle className="truncate text-sm">
                           回连流
@@ -431,7 +446,9 @@ export default function OOBPage() {
                           谁在什么时候、用什么客户端、请求了哪条路径
                         </CardDescription>
                       </div>
-                      {current ? <LevelBadge level={current.level} name={current.level_name} /> : null}
+                      {current ? (
+                        <LevelBadge level={current.level} name={current.level_name} className="ml-auto shrink-0" />
+                      ) : null}
                     </div>
                   </CardHeader>
                   <CardContent className="min-h-0 flex-1 p-0">
@@ -443,12 +460,12 @@ export default function OOBPage() {
                       ) : (
                         <Table>
                           <TableHeader className="sticky top-0 z-10 bg-card">
-                            <TableRow>
-                              <TableHead className="w-20 text-xs">时间</TableHead>
-                              <TableHead className="w-24 text-xs">变体</TableHead>
-                              <TableHead className="w-32 text-xs">来源 IP</TableHead>
-                              <TableHead className="text-xs">请求</TableHead>
-                              <TableHead className="w-40 text-xs">客户端</TableHead>
+                            <TableRow className="[&>th]:h-9 [&>th]:text-[11px] [&>th]:font-semibold [&>th]:text-foreground/80">
+                              <TableHead className="w-[92px] shrink-0">时间</TableHead>
+                              <TableHead className="w-[108px] shrink-0">变体</TableHead>
+                              <TableHead className="w-[132px] shrink-0">来源 IP</TableHead>
+                              <TableHead className="min-w-0">请求</TableHead>
+                              <TableHead className="w-[132px] shrink-0">客户端</TableHead>
                             </TableRow>
                           </TableHeader>
                           <TableBody>
@@ -456,8 +473,8 @@ export default function OOBPage() {
                               <TableRow
                                 key={h.id}
                                 className={cn(
-                                  "cursor-pointer",
-                                  detail?.hit.id === h.id && "bg-muted",
+                                  "cursor-pointer [&>td]:py-2.5 even:bg-muted/30 hover:bg-muted/50",
+                                  detail?.hit.id === h.id && "bg-primary/10 hover:bg-primary/15",
                                 )}
                                 onClick={() => openDetail(h.id)}
                               >
@@ -478,8 +495,13 @@ export default function OOBPage() {
                                   {h.remote_ip}
                                 </TableCell>
                                 <TableCell className="max-w-0">
-                                  <div className="flex items-center gap-1 truncate font-mono text-[11px]">
-                                    <span className="shrink-0 text-muted-foreground">{h.method}</span>
+                                  <div
+                                    className="flex items-center gap-1.5 truncate font-mono text-[11px]"
+                                    title={`${h.method} ${h.path}${h.query ? `?${h.query}` : ""}`}
+                                  >
+                                    <span className="shrink-0 rounded bg-muted/60 px-1 text-[10px] text-muted-foreground">
+                                      {h.method}
+                                    </span>
                                     <span className="truncate">{h.path}{h.query ? `?${h.query}` : ""}</span>
                                   </div>
                                 </TableCell>
@@ -731,7 +753,7 @@ export default function OOBPage() {
 }
 
 function StatCard({
-  icon, label, value, hint, mono, tone,
+  icon, label, value, hint, mono, tone, weight = 1,
 }: {
   icon: React.ReactNode;
   label: string;
@@ -739,24 +761,32 @@ function StatCard({
   hint?: string;
   mono?: boolean;
   tone?: "warn";
+  // weight 决定这块在统计栏里占的横向权重：核心指标 >1，辅助指标 <1。
+  weight?: number;
 }) {
   return (
-    <div className={cn(
-      "flex flex-col gap-0.5 rounded-md border px-3 py-2",
-      tone === "warn" && "border-amber-500/40 bg-amber-500/5",
-    )}>
+    <div
+      style={{ flex: `${weight} 1 150px` }}
+      className={cn(
+        "flex min-w-0 flex-col gap-1.5 rounded-lg border bg-card/40 px-3.5 py-3",
+        tone === "warn" && "border-amber-500/40 bg-amber-500/5",
+      )}
+    >
       <div className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
         {icon}
-        <span>{label}</span>
+        <span className="truncate">{label}</span>
       </div>
-      <div className={cn(
-        "truncate text-sm font-semibold tabular-nums",
-        mono && "font-mono text-xs",
-        tone === "warn" && "text-amber-700 dark:text-amber-300",
-      )} title={value}>
+      <div
+        className={cn(
+          "truncate text-xl leading-tight font-semibold tracking-tight tabular-nums",
+          mono && "font-mono text-base",
+          tone === "warn" && "text-amber-700 dark:text-amber-300",
+        )}
+        title={value}
+      >
         {value}
       </div>
-      {hint ? <div className="truncate text-[10px] text-muted-foreground/70">{hint}</div> : null}
+      {hint ? <div className="truncate text-[11px] leading-4 text-muted-foreground/70">{hint}</div> : null}
     </div>
   );
 }
