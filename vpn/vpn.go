@@ -410,22 +410,38 @@ func (m *Manager) reapIdle() {
 		m.mu.Unlock()
 
 		inst.mu.Lock()
-		idle := inst.state == StateUp && !inst.lastUsed.IsZero() && time.Since(inst.lastUsed) > idleTTL
 		name := inst.profile.Name
 		profID := inst.profile.ID
 		lastUsed := inst.lastUsed
+		up := inst.state == StateUp
 		inst.mu.Unlock()
 
-		// 时间没到但已经没有任务绑定：超过宽限期也回收。宽限期取 idleTTL 的一半，
-		// 避免任务里两步操作间隔稍长就把隧道拆了。
-		if !idle && !lastUsed.IsZero() && time.Since(lastUsed) > idleTTL/2 && m.activeBinding != nil && !m.activeBinding(profID) {
-			idle = true
+		// 判定顺序很重要：先看占用，再看空闲。
+		// 有任务绑定（running/created）→ 永不回收，哪怕 30 分钟没流量（任务可能
+		// 在等远端响应、在慢慢跑长命令）。占用检查失败（DB 不可用）保守视为有占用。
+		occupied := true
+		if m.activeBinding != nil {
+			occupied = m.activeBinding(profID)
 		}
+		idle := false
+		reason := ""
+		if !occupied {
+			// 无占用：宽限期（idleTTL/2 = 15 分钟）一到就回收。
+			if !lastUsed.IsZero() && time.Since(lastUsed) > idleTTL/2 {
+				idle = true
+				reason = "无任务占用且空闲超过 15 分钟"
+			}
+		} else if up && !lastUsed.IsZero() && time.Since(lastUsed) > idleTTL {
+			// 有占用但 30 分钟完全无流量：大概率任务卡死了，也回收（任务再取用时重建）。
+			idle = true
+			reason = "有占用但空闲超过 30 分钟"
+		}
+		_ = up
 
 		if idle {
 			// Stop 会把状态置为 Stopped；monitor 重连前会重新检查状态，因此不会把
 			// 刚回收的隧道又拉起来。下次任务取用时 Ensure 会重建。
-			m.logf("[vpn] %s 空闲超过 %s，回收隧道（任务再跑时自动重连）", name, idleTTL)
+			m.logf("[vpn] %s 回收隧道：%s（任务再跑时自动重连）", name, reason)
 			m.Stop(k)
 		}
 	}
