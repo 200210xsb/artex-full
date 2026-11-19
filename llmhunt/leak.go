@@ -160,10 +160,10 @@ func (s *Scanner) huntLeaks(ctx context.Context) (int, int) {
 			}
 			n := s.extractKeysFrom(raw, body, "leak-url")
 			// 首页里 key 往往在它引用的 JS 里：跟进同源脚本。
+			// 注意：此时已经持有 host 的锁（defer hostUnlock），不能再 hostGuard——
+			// 同一个 mutex 重入会自锁死（线上踩过：整轮狩猎永久卡住、Stop 也停不掉）。
 			for _, js := range scriptSources(body, raw, leakMaxScripts) {
-				hostGuard(host)
 				st2, b2, _ := s.get(ctx, js, leakBodyLimit)
-				hostUnlock(host)
 				if st2 == 200 && b2 != "" {
 					n += s.extractKeysFrom(js, b2, "leak-js")
 				}
