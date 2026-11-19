@@ -45,10 +45,10 @@ var hunterLeakQueries = []leakQuery{
 }
 
 var quakeLeakQueries = []leakQuery{
-	// 网关优先：one-api/new-api 的默认口令命中率高，登进去读到的渠道 key 是
-	// 真实生产 key。实测 Quake 查询可用（返回 3 条实例）。
-	{`body="One API" && body="login"`, "one-api 网关"},
-	{`body="new-api" && body="login"`, "new-api 网关"},
+	// 网关优先（app 精确指纹，实测命中：93.123.118.92:44444 默认口令直接进）。
+	// body 组合词查询换成 app 字段——教程页彻底消失，候选全是真实网关。
+	{`app:"one-api"`, "one-api 网关"},
+	{`app:"new-api"`, "new-api 网关"},
 	{`body="OPENAI_API_KEY" && body="api.openai.com"`, "OpenAI 生产配置"},
 	{`body="DEEPSEEK_API_KEY" && body="api.deepseek.com"`, "DeepSeek 生产配置"},
 	{`body="sk-ant-api03-"`, "Anthropic 新式 key"},
