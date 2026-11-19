@@ -87,7 +87,7 @@ export default function LLMHuntPage() {
   const [huntLeaks, setHuntLeaks] = usePersisted("huntLeaks", true);
   const [useSearch, setUseSearch] = usePersisted("useSearch", false);
   const [fromAssets, setFromAssets] = usePersisted("fromAssets", false);
-  const [allowAuth, setAllowAuth] = usePersisted("allowAuth", false);
+  const [allowAuth, setAllowAuth] = usePersisted("allowAuth", true);
   const [seeds, setSeeds] = React.useState("");
   const [showAdvanced, setShowAdvanced] = React.useState(false);
   const [busy, setBusy] = React.useState(false);

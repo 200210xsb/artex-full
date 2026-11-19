@@ -153,7 +153,7 @@ func (s *Server) llmHuntScan(w http.ResponseWriter, r *http.Request) {
 		UseSearch     bool   `json:"use_search"`  // 用搜索引擎发现候选
 		Dorks         string `json:"dorks"`       // 自定义搜索词（每行一个；空=内置）
 		MaxFromSearch int    `json:"max_from_search"`
-		AllowAuth     bool   `json:"allow_auth"` // 默认口令探测（POST，仅授权目标）
+		AllowAuth     *bool  `json:"allow_auth"` // 默认口令探测：未传时默认开（显式 false 才关）
 		HuntLeaks     bool   `json:"hunt_leaks"`
 		Repeat        bool   `json:"repeat"` // 持续狩猎（每 5 分钟一轮，直到停止）
 		RepeatMinutes int    `json:"repeat_minutes"`
@@ -211,7 +211,7 @@ func (s *Server) llmHuntScan(w http.ResponseWriter, r *http.Request) {
 		Targets:         targets,
 		Dorks:           dorks,
 		MaxFromSearch:   req.MaxFromSearch,
-		AllowAuthChecks: req.AllowAuth,
+		AllowAuthChecks: req.AllowAuth == nil || *req.AllowAuth,
 		HuntLeaks:       req.HuntLeaks,
 		Repeat:          req.Repeat,
 		AutoVerify:      req.AutoVerify,

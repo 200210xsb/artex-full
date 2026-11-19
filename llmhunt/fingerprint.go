@@ -47,6 +47,9 @@ var keyPatterns = []keyPattern{
 	{"GitHub Token", regexp.MustCompile(`ghp_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{22,}`)},
 	{"HuggingFace Token", regexp.MustCompile(`hf_[A-Za-z0-9]{30,}`)},
 	{"Google API Key", regexp.MustCompile(`AIza[0-9A-Za-z_-]{35}`)},
+	{"DeepSeek", regexp.MustCompile(`sk-[A-Za-z0-9]{32}`)},
+	{"智谱 GLM", regexp.MustCompile(`\b[0-9a-zA-Z]{16}\.[A-Za-z0-9]{16}\b`)},
+	{"月之暗面 Kimi", regexp.MustCompile(`sk-[A-Za-z0-9]{48}`)},
 	{"Azure AccountKey", regexp.MustCompile(`AccountKey=[A-Za-z0-9+/=]{40,}`)},
 	{"私钥", regexp.MustCompile(`-----BEGIN (?:RSA |EC )?PRIVATE KEY-----`)},
 }

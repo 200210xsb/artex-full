@@ -32,19 +32,22 @@ type leakQuery struct {
 	label string
 }
 
+// 查询词刻意收紧：裸查 `body="OPENAI_API_KEY"` 命中的大多是教程/示例/Demo 页，
+// 里面的 key 是写死的占位串，验出来全是 401。组合条件要求"有 key 赋值 且 有真实
+// API 调用特征"，把假 key 页面压下去。
 var hunterLeakQueries = []leakQuery{
-	{`web.body="OPENAI_API_KEY"`, "OpenAI key 赋值"},
-	{`web.body="sk-proj-"`, "OpenAI 新式 key"},
-	{`web.body="ANTHROPIC_API_KEY"`, "Anthropic key 赋值"},
-	{`web.body="DEEPSEEK_API_KEY"`, "DeepSeek key 赋值"},
-	{`web.body="ZHIPUAI_API_KEY"`, "智谱 GLM key 赋值"},
-	{`web.body="api.openai.com/v1/chat/completions"`, "OpenAI 调用点"},
+	{`web.body="OPENAI_API_KEY" && web.body="api.openai.com"`, "OpenAI 生产配置"},
+	{`web.body="sk-proj-" && web.body="chat/completions"`, "OpenAI 生产调用"},
+	{`web.body="ANTHROPIC_API_KEY" && web.body="api.anthropic.com"`, "Anthropic 生产配置"},
+	{`web.body="DEEPSEEK_API_KEY" && web.body="api.deepseek.com"`, "DeepSeek 生产配置"},
+	{`web.body="ZHIPUAI_API_KEY" && web.body="open.bigmodel.cn"`, "智谱 GLM 生产配置"},
+	{`web.body="MOONSHOT_API_KEY" || web.body="api.moonshot.cn"`, "月之暗面 Kimi"},
 }
 
 var quakeLeakQueries = []leakQuery{
-	{`body="OPENAI_API_KEY"`, "OpenAI key 赋值"},
-	{`body="ANTHROPIC_API_KEY"`, "Anthropic key 赋值"},
-	{`body="sk-proj-"`, "OpenAI 新式 key"},
+	{`body="OPENAI_API_KEY" && body="api.openai.com"`, "OpenAI 生产配置"},
+	{`body="DEEPSEEK_API_KEY" && body="api.deepseek.com"`, "DeepSeek 生产配置"},
+	{`body="sk-ant-api03-"`, "Anthropic 新式 key"},
 }
 
 // leakConfigPaths 是 Quake 命中后值得一试的配置路径（每台 2 个，够用且不吵）。
@@ -158,6 +161,11 @@ func (s *Scanner) huntLeaks(ctx context.Context) (int, int) {
 			if st != 200 || body == "" {
 				return
 			}
+			// 文档/示例页直接跳过：这类页面里的 key 全是教程占位串，
+			// 验出来全是 401，还占验证预算。
+			if looksLikeDocPage(body) {
+				return
+			}
 			n := s.extractKeysFrom(raw, body, "leak-url")
 			// 首页里 key 往往在它引用的 JS 里：跟进同源脚本。
 			// 注意：此时已经持有 host 的锁（defer hostUnlock），不能再 hostGuard——
@@ -222,6 +230,27 @@ func hunterLeakURLs(ctx context.Context, key, query string, size int) []string {
 		}
 	}
 	return out
+}
+
+// docPageWords 命中越多越像文档/教程页：这类页面里的 key 是讲解用的假串。
+var docPageWords = []string{
+	"readme", "documentation", "getting started", "tutorial", "example usage",
+	"quickstart", "安装教程", "使用文档", "示例代码", "教程",
+}
+
+// looksLikeDocPage 粗筛文档页：标题/正文出现 ≥2 个文档特征词就跳过。
+func looksLikeDocPage(body string) bool {
+	lower := strings.ToLower(body)
+	hit := 0
+	for _, w := range docPageWords {
+		if strings.Contains(lower, w) {
+			hit++
+			if hit >= 2 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // extractKeysFrom 从任意 URL 的响应体里提 key，并标来源。

@@ -42,6 +42,25 @@ var verifyTargets = map[string]verifyTarget{
 			return map[string]string{"x-api-key": k, "anthropic-version": "2023-06-01"}
 		},
 	},
+	// DeepSeek / 智谱：列模型接口同样是免费只读，一次请求即判活。
+	"DeepSeek": {
+		url: "https://api.deepseek.com/v1/models",
+		headers: func(k string) map[string]string {
+			return map[string]string{"Authorization": "Bearer " + k}
+		},
+	},
+	"智谱 GLM": {
+		url: "https://open.bigmodel.cn/api/paas/v4/models",
+		headers: func(k string) map[string]string {
+			return map[string]string{"Authorization": "Bearer " + k}
+		},
+	},
+	"月之暗面 Kimi": {
+		url: "https://api.moonshot.cn/v1/models",
+		headers: func(k string) map[string]string {
+			return map[string]string{"Authorization": "Bearer " + k}
+		},
+	},
 }
 
 // Verifier 负责批量验证。
