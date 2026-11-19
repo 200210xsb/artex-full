@@ -94,6 +94,8 @@ func NewVerifier(pg *db.DB) *Verifier {
 }
 
 // VerifyPending 验证最多 limit 条尚未验证的 key，返回 (尝试数, 有效数)。
+// error 状态（网络失败）最多重试 3 次：超过后标 retry3 终态，不再排队，
+// 否则网络抖动会让同一批 key 永远占着验证队列。
 func (v *Verifier) VerifyPending(ctx context.Context, limit int) (tried, valid int, err error) {
 	rows, err := v.pg.UnverifiedKeys(limit)
 	if err != nil {
@@ -111,6 +113,23 @@ func (v *Verifier) VerifyPending(ctx context.Context, limit int) (tried, valid i
 		}
 		tried++
 		state, note := v.verifyOne(ctx, vt, k.Raw)
+		if state == "error" {
+			// error 允许重试：第 1/2 次清回空状态（下次还会排队），第 3 次写死
+			// retry3 标记成为终态，不再排队。
+			if strings.Contains(k.Note, "[r1]") {
+				note += " [r2]"
+				_ = v.pg.SetLLMKeyVerify(k.ID, "", note)
+				continue
+			}
+			if strings.Contains(k.Note, "[r2]") {
+				note += " [retry3]"
+				_ = v.pg.SetLLMKeyVerify(k.ID, "error", note)
+				continue
+			}
+			note += " [r1]"
+			_ = v.pg.SetLLMKeyVerify(k.ID, "", note)
+			continue
+		}
 		_ = v.pg.SetLLMKeyVerify(k.ID, state, note)
 		if state == "valid" {
 			valid++

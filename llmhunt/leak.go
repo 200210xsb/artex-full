@@ -66,13 +66,20 @@ func (s *Scanner) huntLeaks(ctx context.Context) (int, int) {
 	}
 
 	// ① 先把候选 URL 全收集出来（这一步很快：只打测绘 API）
+	// 跨轮记忆：Quake/Hunter 的候选集每轮几乎相同，没有这层记忆的话 90% 的
+	// 请求是白发的（实测 6 轮抓的都是同一批 URL）。已抓过的直接跳过，
+	// 只有测绘数据集更新出现的新 URL 才会真正发请求。
+	if s.seenLeak == nil {
+		s.seenLeak = map[string]bool{}
+	}
 	cands := make([]string, 0, leakMaxURL)
 	seen := map[string]bool{}
 	add := func(u string) {
-		if u == "" || seen[u] || len(cands) >= leakMaxURL {
+		if u == "" || seen[u] || s.seenLeak[u] || len(cands) >= leakMaxURL {
 			return
 		}
 		seen[u] = true
+		s.seenLeak[u] = true
 		cands = append(cands, u)
 	}
 

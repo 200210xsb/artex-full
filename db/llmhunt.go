@@ -343,11 +343,17 @@ func (d *DB) UnverifiedKeys(limit int) ([]struct {
 	Type   string
 	Raw    string
 	Masked string
+	Note   string
 }, error) {
 	if limit <= 0 || limit > 50 {
 		limit = 20
 	}
-	rows, err := d.Query(`SELECT id, key_type, raw, masked FROM llm_keys WHERE verify_state='' ORDER BY found_at DESC LIMIT $1`, limit)
+	// 只取从未验证过的；error（网络失败）允许重试到 3 次为止——验证 note 里
+	// 记了次数。invalid/valid 是终态，不再排队。
+	rows, err := d.Query(`SELECT id, key_type, raw, masked, coalesce(verify_note,'') FROM llm_keys
+WHERE verify_state=''
+   OR (verify_state='error' AND verify_note NOT LIKE '%[retry3]%')
+ORDER BY found_at DESC LIMIT $1`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -357,6 +363,7 @@ func (d *DB) UnverifiedKeys(limit int) ([]struct {
 		Type   string
 		Raw    string
 		Masked string
+		Note   string
 	}
 	for rows.Next() {
 		var r struct {
@@ -364,8 +371,9 @@ func (d *DB) UnverifiedKeys(limit int) ([]struct {
 			Type   string
 			Raw    string
 			Masked string
+			Note   string
 		}
-		if rows.Scan(&r.ID, &r.Type, &r.Raw, &r.Masked) == nil {
+		if rows.Scan(&r.ID, &r.Type, &r.Raw, &r.Masked, &r.Note) == nil {
 			out = append(out, r)
 		}
 	}

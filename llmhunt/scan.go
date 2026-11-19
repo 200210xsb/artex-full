@@ -92,6 +92,8 @@ type Scanner struct {
 	scanClient *http.Client
 	// lastGatewayToken 是最近一次网关默认口令登录成功的 token（读渠道用）。
 	lastGatewayToken string
+	// seenLeak 是泄漏狩猎的跨轮记忆：已抓过的 URL 不再抓（每轮候选 90% 重复）。
+	seenLeak map[string]bool
 
 	mu      sync.Mutex
 	running bool
