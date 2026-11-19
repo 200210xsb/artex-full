@@ -36,8 +36,10 @@ const (
 
 // GitHubKeyHunter 跑一轮 GitHub 密钥狩猎。
 type GitHubKeyHunter struct {
-	pg           *db.DB
-	token        string
+	pg    *db.DB
+	token string
+	// proxy 是 GitHub API/Contents 的出口（api.github.com 在墙外，直连不稳）。
+	proxy        string
 	mu           sync.Mutex
 	busy         bool
 	found        int
@@ -58,6 +60,13 @@ func NewGitHubKeyHunter(pg *db.DB, token string) *GitHubKeyHunter {
 		}
 	}
 	return &GitHubKeyHunter{pg: pg, token: token}
+}
+
+// SetProxy 注入 GitHub 访问的出口代理（server 启动时用全局代理调用一次）。
+func (h *GitHubKeyHunter) SetProxy(raw string) {
+	h.mu.Lock()
+	h.proxy = strings.TrimSpace(raw)
+	h.mu.Unlock()
 }
 
 // Ready 报告 token 是否可用。
@@ -169,7 +178,19 @@ func (h *GitHubKeyHunter) Stop() {
 }
 
 func (h *GitHubKeyHunter) run(ctx context.Context) {
+	// GitHub 在墙外：默认走 server 注入的全局代理出口；没配则直连兜底。
+	h.mu.Lock()
+	proxy := h.proxy
+	h.mu.Unlock()
 	client := &http.Client{Timeout: 25 * time.Second}
+	if proxy != "" {
+		if u, err := url.Parse(proxy); err == nil {
+			client = &http.Client{
+				Timeout:   25 * time.Second,
+				Transport: &http.Transport{Proxy: http.ProxyURL(u)},
+			}
+		}
+	}
 	fetched := 0
 	seenRepo := map[string]bool{}
 

@@ -59,6 +59,8 @@ var ghHunterOnce sync.Once
 func (s *Server) llmKeyHunter() *llmhunt.GitHubKeyHunter {
 	ghHunterOnce.Do(func() {
 		s.llmGH = llmhunt.NewGitHubKeyHunter(s.m.pg, "")
+		// GitHub API 在墙外，搜索/Contents 走全局代理出口（同打目标）。
+		s.llmGH.SetProxy(s.m.GlobalProxy())
 	})
 	return s.llmGH
 }
