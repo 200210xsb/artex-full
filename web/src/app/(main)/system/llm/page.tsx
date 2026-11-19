@@ -29,6 +29,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { api } from "@/lib/api";
 import type { LLMPoolMember, LLMPoolStatus, LLMProfile, LLMRetryOverride } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { LLMProbeButton } from "@/components/llm-probe-button";
 
 import { ProfileRetryFields, RetryPolicyPanel, ZERO_OVERRIDE } from "./_components/retry";
 
@@ -926,6 +927,9 @@ export default function LLMPage() {
                       </div>
                     </div>
 
+                    <div className="flex items-center gap-2 pl-6" onClick={(e) => e.stopPropagation()}>
+                      <LLMProbeButton profileId={p.id} />
+                    </div>
                     <div className="flex flex-wrap gap-x-3 gap-y-0.5 pl-6 text-muted-foreground text-xs">
                       {p.api_key_hint && <span>{p.api_key_hint}</span>}
                       <span>
