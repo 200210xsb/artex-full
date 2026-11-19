@@ -273,8 +273,16 @@ export default function LLMHuntPage() {
         <Divider />
         <Stat
           label="状态"
-          text={status.running ? "狩猎中" : last ? "已停止" : "未开始"}
-          hint={last?.note || (last ? `#${last.id} · ${last.status}` : "")}
+          text={
+            status.running
+              ? "狩猎中"
+              : last
+                ? last.status === "running"
+                  ? "已中断（服务重启）"
+                  : "已停止"
+                : "未开始"
+          }
+          hint={last?.note || (last ? `#${last.id} · ${status.running ? "进行中" : last.status}` : "")}
         />
       </div>
 
