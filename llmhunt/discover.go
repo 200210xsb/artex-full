@@ -41,6 +41,10 @@ func dorkVendor(dork string) string {
 		return "flowise"
 	case strings.Contains(d, "vllm"), strings.Contains(d, "v1/models"):
 		return "openai-compatible"
+	case strings.Contains(d, "one api"), strings.Contains(d, "one-api"):
+		return "one-api"
+	case strings.Contains(d, "new-api"):
+		return "new-api"
 	}
 	return ""
 }

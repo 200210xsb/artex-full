@@ -30,7 +30,24 @@ type authCheck struct {
 
 var authChecks = []authCheck{
 	{
-		// one-api / new-api：默认 root/123456 非常常见；渠道列表里就是上游 key。
+		// one-api / new-api 网关（按指纹直接命中，优先级最高）：默认 root/123456
+		// 非常常见；渠道列表接口里就是**真实生产**的上游 key 明文。
+		// /api/channel/ 返回的 key 字段即上游凭据，read-only 获取。
+		vendor: "one-api", path: "/api/user/login",
+		body:     `{"username":"%s","password":"%s"}`,
+		tokenKey: "data.token",
+		keyPaths: []string{"/api/channel/?p=0&page_size=100", "/api/channel/", "/api/user/self"},
+	},
+	{
+		// new-api 是 one-api 的活跃分支，token 字段与 one-api 相同但部分版本
+		// 把登录响应包在 data 下；keyPaths 一致。
+		vendor: "new-api", path: "/api/user/login",
+		body:     `{"username":"%s","password":"%s"}`,
+		tokenKey: "data.token",
+		keyPaths: []string{"/api/channel/?p=0&page_size=100", "/api/channel/", "/api/user/self"},
+	},
+	{
+		// OpenAI 兼容后端（vLLM/one-api 等泛指）：保留兜底。
 		vendor: "openai-compatible", path: "/api/user/login",
 		body:     `{"username":"%s","password":"%s"}`,
 		tokenKey: "data.access_token",
@@ -94,6 +111,9 @@ func (s *Scanner) tryDefaultAuth(ctx context.Context, base string, assetID int64
 			if token == "" {
 				continue
 			}
+			s.mu.Lock()
+			s.lastGatewayToken = token
+			s.mu.Unlock()
 			// 登录成功：读鉴权后的接口，把 key 收进来。
 			for _, p := range check.keyPaths {
 				if *budget <= 0 || ctx.Err() != nil {

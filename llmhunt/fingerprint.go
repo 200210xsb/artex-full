@@ -23,6 +23,10 @@ var probes = []probe{
 	{vendor: "langflow", path: "/api/v1/flows/", wantBody: "", version: ""},
 	{vendor: "flowise", path: "/api/v1/chatflows", wantBody: "", version: ""},
 	{vendor: "n8n", path: "/rest/login", wantBody: "", version: ""},
+	// one-api / new-api：/api/status 是公开接口，回 JSON 带 system_name/version。
+	// 命中即标记为网关，后续走默认口令链路读渠道。
+	{vendor: "one-api", path: "/api/status", wantBody: "system_name", version: ""},
+	{vendor: "new-api", path: "/api/status", wantBody: "system_name", version: ""},
 	// 下面这些是"模型服务/网关"：它们跑的就是 DeepSeek / GLM / Qwen 这类模型，
 	// 未授权时能直接列模型（甚至直接推理），是这类项目里最有价值的一类暴露。
 	{vendor: "librechat", path: "/api/config", wantBody: "", version: ""},
@@ -39,6 +43,8 @@ type keyPattern struct {
 }
 
 var keyPatterns = []keyPattern{
+	{"one-api", regexp.MustCompile(`"system_name":"[^"]*"|"version":"v[0-9]+\.[0-9]+\.[0-9]+"`)},
+	{"new-api", regexp.MustCompile(`"system_name":"[^"]*"|"version":"v[0-9]+\.[0-9]+\.[0-9]+"`)},
 	{"OpenAI", regexp.MustCompile(`sk-(?:proj-)?[A-Za-z0-9_-]{20,}`)},
 	{"Anthropic", regexp.MustCompile(`sk-ant-[A-Za-z0-9_-]{20,}`)},
 	{"AWS AccessKey", regexp.MustCompile(`AKIA[0-9A-Z]{16}`)},
