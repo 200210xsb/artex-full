@@ -393,10 +393,14 @@ func (m *Manager) startSocks(inst *instance, dir string) error {
 	// （报 legacy domain strategy options is deprecated）。IPv4-only 只靠 dns.strategy，
 	// 这个写法在 1.13 上是合法的。曾经因为留着那个字段，sing-box 起不来，
 	// 外部只看到"端口 1080 未监听"，很难查。
+	// dns.servers 用 223.5.5.5 作为主解析器：VPN push 的内网 DNS（192.168.x.1）
+	// 间歇性不可达，导致 sing-box 域名解析偶发失败 → SOCKS 'general server
+	// failure' → monitor 误判隧道挂掉触发重建循环（实测漏洞盒子每 ~10 分钟
+	// 重建一次）。sing-box 的多 DNS server 是并发查询，公共 DNS 兜底后探测稳定。
 	cfg := fmt.Sprintf(`{"log":{"level":"warn"},
- "dns":{"servers":[{"type":"local"}],"strategy":"ipv4_only"},
+ "dns":{"servers":[{"type":"local","tag":"local"},{"type":"udp","server":"223.5.5.5","tag":"public"},{"type":"udp","server":"119.29.29.29","tag":"public2"}],"strategy":"ipv4_only"},
  "inbounds":[{"type":"mixed","listen":%q,"listen_port":%d}],
- "outbounds":[{"type":"direct","tag":"direct"}]}`, inst.nsIP, socksPort)
+ "outbounds":[{"type":"direct","tag":"direct","domain_resolver":{"server":"public"}}]}`, inst.nsIP, socksPort)
 	cfgPath := filepath.Join(dir, "socks.json")
 	if err := os.WriteFile(cfgPath, []byte(cfg), 0o600); err != nil {
 		return fmt.Errorf("写入 SOCKS 配置失败: %w", err)
