@@ -289,7 +289,16 @@ func (s *Server) restoreTaskRuntimes() {
 		if n, _ := t.Store.ResetRunningIntents(); n > 0 {
 			log.Printf("[engine] task %s 重置 %d 个残留 running 意图为 open", t.ID, n)
 		}
-		if lifecycle.Paused {
+		// 恢复暂停态：paused 列是主信号；status='paused' 作兜底——两者由
+		// 不同的写入路径维护（control pause 写两者，但绕过 control 的运维操作
+		// 可能只改 status），不一致时以 paused 语义为准，避免重启后 paused 任务
+		// 被重新派活（实测 287 卡过这个坑）。
+		if lifecycle.Paused || lifecycle.Status == "paused" {
+			if !lifecycle.Paused {
+				// 把内存态对齐：status=paused 但 paused 列丢了，补写回 DB。
+				_ = m.SetTaskPaused(t.ID, true)
+				log.Printf("[engine] task %s status=paused 但 paused 列为 false，已对齐暂停态", t.ID)
+			}
 			s.engine.Pause(t.ID, agent.AbortPausedOnReload)
 		}
 		// 任务级超时:为每个未终态、带 timeout 的任务起 deadline 协调器,独立于 planner/worker
