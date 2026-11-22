@@ -88,9 +88,9 @@ type Manager struct {
 	// activeBinding 由 server 注入：某 profile 是否还有任务绑定且在跑。
 	// 为 nil 时退化为纯空闲判定（旧行为）。
 	activeBinding ActiveBinding
-	dir           string // where generated configs and credential files live
-	singbox       string // sing-box binary used as the in-namespace SOCKS server
-	probeURL      string // plain-HTTP endpoint that echoes the caller's IP
+	dir           string   // where generated configs and credential files live
+	singbox       string   // sing-box binary used as the in-namespace SOCKS server
+	probeURLs     []string // 出口回显端点（域名型在前，IP 型兜底；IP 型绕开 DNS）
 
 	mu     sync.Mutex
 	items  map[string]*instance
@@ -106,12 +106,14 @@ type Manager struct {
 // fails with a clear error.
 func New(dir, singbox string) *Manager {
 	return &Manager{
-		dir:      dir,
-		singbox:  singbox,
-		probeURL: "http://ip.3322.net",
-		items:    map[string]*instance{},
-		slots:    map[int]bool{},
-		logf:     log.Printf,
+		dir:     dir,
+		singbox: singbox,
+		// probeURLs 按序尝试：域名型在前（信息全），IP 型兜底——内网 DNS 间歇性
+		// 不可达时域名解析会卡死 getaddrinfo，IP 型端点绕开 DNS 直接回显出口。
+		probeURLs: []string{"http://ip.3322.net", "http://1.1.1.1"},
+		items:     map[string]*instance{},
+		slots:     map[int]bool{},
+		logf:      log.Printf,
 	}
 }
 
@@ -463,14 +465,28 @@ func (m *Manager) probe(socksAddr string) error {
 	if socksAddr == "" {
 		return errors.New("隧道未就绪")
 	}
-	ip, err := probeVia(socksAddr, m.probeURL)
-	if err != nil {
-		return err
+	// 每轮探测先试全部端点（域名型→IP 型），3 轮、指数退避。IP 型端点绕开
+	// DNS：VPN push 的内网 DNS 间歇性不可达时（实测漏洞盒子），域名解析卡死
+	// getaddrinfo 导致探测假失败 → monitor 误拆隧道 → 每 ~10 分钟重建循环。
+	var lastErr error
+	backoffs := []time.Duration{2 * time.Second, 4 * time.Second, 8 * time.Second}
+	for i := 0; i < 3; i++ {
+		if i > 0 {
+			time.Sleep(backoffs[i-1])
+		}
+		for _, u := range m.probeURLs {
+			ip, err := probeVia(socksAddr, u)
+			if err == nil && ip != "" {
+				return nil
+			}
+			if err != nil {
+				lastErr = err
+			} else {
+				lastErr = errors.New("出口未返回地址")
+			}
+		}
 	}
-	if ip == "" {
-		return errors.New("出口未返回地址")
-	}
-	return nil
+	return lastErr
 }
 
 // normalizeShort renders config notes for logs.

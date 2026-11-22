@@ -211,13 +211,21 @@ func (m *Manager) bringUp(ctx context.Context, inst *instance) error {
 	// 给它几次机会，别把"慢一拍"误判成"连不上"。
 	var ip string
 	var probeErr error
+	// 指数退避 2s/4s/8s + 多端点（域名型→IP 型）：内网 DNS 抖动窗口实测可达
+	// 10~20 秒，固定 2s 三连发全落窗口里；IP 型端点绕开 DNS 不受其影响。
+	backoffs := []time.Duration{2 * time.Second, 4 * time.Second, 8 * time.Second}
 	for attempt := 1; attempt <= 3; attempt++ {
-		ip, probeErr = probeVia(addr, m.probeURL)
+		for _, u := range m.probeURLs {
+			ip, probeErr = probeVia(addr, u)
+			if probeErr == nil && ip != "" {
+				break
+			}
+		}
 		if probeErr == nil && ip != "" {
 			break
 		}
 		if attempt < 3 {
-			time.Sleep(2 * time.Second)
+			time.Sleep(backoffs[attempt-1])
 		}
 	}
 	if probeErr != nil || ip == "" {

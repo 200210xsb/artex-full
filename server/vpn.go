@@ -1,9 +1,12 @@
 package server
 
 import (
+	"context"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/artex/vpn"
@@ -157,19 +160,28 @@ func (s *Server) startVPNProfile(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "请先填写该项目的 VPN 账号")
 		return
 	}
-	url, err := s.m.vpnMgr.Ensure(r.Context(), vpn.Profile{
-		Key: vpnTunnelKey(prof.ID, user),
-		ID:  prof.ID, Name: prof.Name, Raw: prof.OVPN,
-		Username: user, Password: pass, ExpectEgress: prof.ExpectEgress,
-	})
-	if err != nil {
-		writeErr(w, 502, err.Error())
-		return
+	// 建链改异步：立即返回"连接中"，隧道在后台建（BringUp 用独立 ctx 不会被
+	// 这次请求的中断打死）。前端轮询 /api/vpn 看状态从 connecting→up。
+	// 为什么要异步：建链要 20~60 秒（netns + openvpn 拨号 + SOCKS 就绪），
+	// 同步等待会被浏览器/反代的请求超时打断——用户只看到 502/超时，隧道其实
+	// 建了一半还被 cancel。异步后 UI 立即有反馈，状态页轮询到 up 为止。
+	go func() {
+		buildCtx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+		defer cancel()
+		if _, err := s.m.vpnMgr.Ensure(buildCtx, vpn.Profile{
+			Key: vpnTunnelKey(prof.ID, user),
+			ID:  prof.ID, Name: prof.Name, Raw: prof.OVPN,
+			Username: user, Password: pass, ExpectEgress: prof.ExpectEgress,
+		}); err != nil {
+			log.Printf("[vpn] %s 后台建链失败: %v", prof.Name, err)
+		}
+	}()
+
+	st := s.m.vpnMgr.Status(vpnTunnelKey(prof.ID, user))
+	if st.State != vpn.StateUp {
+		st.State = "connecting" // UI 轮询 /api/vpn 时显示"连接中"
 	}
-	writeJSON(w, 200, map[string]any{
-		"socks":  url,
-		"status": s.m.vpnMgr.Status(vpnTunnelKey(prof.ID, user)),
-	})
+	writeJSON(w, 200, map[string]any{"status": st})
 }
 
 // stopVPNProfile tears a tunnel down.

@@ -97,16 +97,46 @@ export function VpnEgressPanel() {
     load();
   }, [load]);
 
+  // 建链是异步的：请求立即返回"连接中"，隧道在后台建。这里启动轮询，
+  // 状态变 up 后提示出口 IP。轮询最多 90 秒（建链通常 20~60 秒）。
   const connect = (p: VPNProfile) => {
     setBusy(p.id);
     api
       .startVPN(p.id)
       .then((r) => {
-        toast.success(`已连接，出口 IP ${r.status.egress_ip || "未知"}`);
-        load();
+        if (r.status?.state === "up") {
+          toast.success(`已连接，出口 IP ${r.status.egress_ip || "未知"}`);
+          setBusy(null);
+          load();
+          return;
+        }
+        toast.info("连接中…（后台建链，完成后自动刷新）");
+        let tries = 0;
+        const timer = setInterval(() => {
+          tries++;
+          api
+            .vpnList()
+            .then((d) => {
+              const t = (d.tunnels ?? []).find((x) => x.id === p.id || x.name === p.name);
+              if (t?.state === "up") {
+                clearInterval(timer);
+                setBusy(null);
+                toast.success(`已连接，出口 IP ${t.egress_ip || "未知"}`);
+                load();
+              } else if (t?.state === "error" || tries > 18) {
+                clearInterval(timer);
+                setBusy(null);
+                if (t?.state === "error") toast.error("连接失败：" + (t.last_error || "未知错误"));
+                load();
+              }
+            })
+            .catch(() => {});
+        }, 5000);
       })
-      .catch((e) => toast.error("连接失败：" + (e as Error).message))
-      .finally(() => setBusy(null));
+      .catch((e) => {
+        toast.error("连接失败：" + (e as Error).message);
+        setBusy(null);
+      });
   };
 
   const disconnect = (p: VPNProfile) => {
