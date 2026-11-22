@@ -257,6 +257,10 @@ func (s *Scanner) Start(opts Options) (int64, error) {
 	s.allowAuth = opts.AllowAuthChecks
 	s.proxy = strings.TrimSpace(opts.Proxy)
 	s.scanClient = s.clientFor(opts.Proxy)
+	// 新一轮扫描要清零诊断计数：否则会继承上一次扫描的"连续无产出"计数，
+	// 让自动停止在第 1 轮就误触发（实测：新一轮第 1 轮就报"连续 2 轮无产出"）。
+	s.lastRound, s.lastCands, s.lastFetched, s.lastFound = 0, 0, 0, 0
+	s.lastErr, s.stopReason, s.roundsNoGain = "", "", 0
 	s.mu.Unlock()
 
 	go s.run(ctx, id, opts)
