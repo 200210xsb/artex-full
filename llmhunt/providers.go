@@ -163,7 +163,11 @@ func SpatialTargets(ctx context.Context, perVendor int) ([]Target, error) {
 	for _, q := range spatialQueries {
 		var hosts []hostPort
 		if k.FOFAKey != "" && q.fofa != "" {
-			hosts = append(hosts, fofaSearch(ctx, k, q.fofa, perVendor)...)
+			got, ferr := fofaSearch(ctx, k, q.fofa, perVendor)
+			if ferr != nil {
+				lastErr = ferr
+			}
+			hosts = append(hosts, got...)
 		}
 		if k.Quake != "" && q.quake != "" && len(hosts) < perVendor {
 			got, qerr := quakeSearch(ctx, k.Quake, q.quake, perVendor)
@@ -176,7 +180,11 @@ func SpatialTargets(ctx context.Context, perVendor int) ([]Target, error) {
 			hosts = append(hosts, shodanSearch(ctx, k.Shodan, q.shodan, perVendor)...)
 		}
 		if k.Hunter != "" && q.hunter != "" && len(hosts) < perVendor {
-			hosts = append(hosts, hunterSearch(ctx, k.Hunter, q.hunter, perVendor)...)
+			got, herr := hunterSearch(ctx, k.Hunter, q.hunter, perVendor)
+			if herr != nil {
+				lastErr = herr
+			}
+			hosts = append(hosts, got...)
 		}
 		for _, h := range hosts {
 			key := fmt.Sprintf("%s:%d", h.host, h.port)
@@ -198,20 +206,21 @@ type hostPort struct {
 	port int
 }
 
-// fofaSearch 调 FOFA 的 search/all。
-func fofaSearch(ctx context.Context, k providerKeys, query string, size int) []hostPort {
+// fofaSearch 调 FOFA 的 search/all。错误要报出来：FOFA 需要 email+key 成对，
+// 只配了 key 时每个查询都会失败——静默吞掉的话，界面看起来就是"没找到"。
+func fofaSearch(ctx context.Context, k providerKeys, query string, size int) ([]hostPort, error) {
 	q := base64.StdEncoding.EncodeToString([]byte(query))
 	u := fmt.Sprintf("https://fofa.info/api/v1/search/all?email=%s&key=%s&qbase64=%s&size=%d&fields=host,ip,port",
 		url.QueryEscape(k.FOFAEmail), url.QueryEscape(k.FOFAKey), url.QueryEscape(q), size)
 	body, err := httpGetJSON(ctx, u, nil)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	var v struct {
 		Results [][]any `json:"results"`
 	}
 	if json.Unmarshal(body, &v) != nil {
-		return nil
+		return nil, fmt.Errorf("FOFA 响应解析失败：%.120s", string(body))
 	}
 	var out []hostPort
 	for _, row := range v.Results {
@@ -230,7 +239,7 @@ func fofaSearch(ctx context.Context, k providerKeys, query string, size int) []h
 			out = append(out, hostPort{host, port})
 		}
 	}
-	return out
+	return out, nil
 }
 
 // quakeSearch 调 Quake 的 search/quake_service。
@@ -248,20 +257,22 @@ func quakeSearch(ctx context.Context, token, query string, size int) ([]hostPort
 	if err != nil {
 		return nil, err
 	}
-	// Quake 的 code 有时是数字（0），有时是字符串（"q5000"）——用 RawMessage
-	// 收，两种都能解析；直接声明成 json.Number 会在字符串时整个解析失败。
+	// Quake 的响应形态有两套：
+	//   成功：{"code":0,"data":[{"ip":"1.2.3.4","port":80}, …]}
+	//   失败：{"code":"q2001","message":"用户当前积分不足…","data":{},"meta":{}}
+	// 失败时 data 是**空对象**而不是数组。旧代码把 data 直接声明成数组，
+	// 于是整个响应解析失败 → 错误被吞成"没有结果"。这正是持续狩猎空转几百轮
+	// 却没人发现配额早就用完的原因：code 可能是数字也可能是字符串，所以
+	// 一律用 RawMessage 收，再自己判别 data 的形态。
 	var v struct {
 		Code    json.RawMessage `json:"code"`
 		Message string          `json:"message"`
-		Data    []struct {
-			IP   string `json:"ip"`
-			Port int    `json:"port"`
-		} `json:"data"`
+		Data    json.RawMessage `json:"data"`
 	}
 	if json.Unmarshal(body, &v) != nil {
-		return nil, fmt.Errorf("Quake 响应解析失败")
+		return nil, fmt.Errorf("Quake 响应解析失败：%.120s", string(body))
 	}
-	// Quake 用 code 表达业务错误：0=成功，其余（限流/配额/鉴权）都要报出来。
+	// Quake 用 code 表达业务错误：0=成功，其余（积分不足/配额用完/限流/鉴权）都要报出来。
 	code := strings.Trim(strings.TrimSpace(string(v.Code)), `"`)
 	if code != "" && code != "0" {
 		msg := v.Message
@@ -270,13 +281,45 @@ func quakeSearch(ctx context.Context, token, query string, size int) ([]hostPort
 		}
 		return nil, fmt.Errorf("Quake 返回 %s：%s", code, msg)
 	}
+	return parseQuakeHosts(v.Data)
+}
+
+// parseQuakeHosts 从 Quake 的 data 字段取出主机列表。
+// data 可能是数组（成功）或空对象（失败时的形态）——后者直接当作没有结果。
+func parseQuakeHosts(raw json.RawMessage) ([]hostPort, error) {
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" || trimmed == "null" {
+		return nil, nil
+	}
+	if !strings.HasPrefix(trimmed, "[") {
+		return nil, nil // 对象形态：错误响应里的空 data
+	}
+	var items []struct {
+		IP   string   `json:"ip"`
+		Port quakeInt `json:"port"`
+	}
+	if json.Unmarshal(raw, &items) != nil {
+		return nil, fmt.Errorf("Quake 结果解析失败：%.120s", trimmed)
+	}
 	var out []hostPort
-	for _, d := range v.Data {
-		if d.IP != "" && d.Port > 0 {
-			out = append(out, hostPort{d.IP, d.Port})
+	for _, d := range items {
+		if d.IP != "" && d.Port.n > 0 {
+			out = append(out, hostPort{d.IP, d.Port.n})
 		}
 	}
 	return out, nil
+}
+
+// quakeInt 兼容 Quake 把端口写成数字（80）或字符串（"80"）两种情况。
+type quakeInt struct{ n int }
+
+func (p *quakeInt) UnmarshalJSON(b []byte) error {
+	s := strings.Trim(strings.TrimSpace(string(b)), `"`)
+	n, err := strconv.Atoi(s)
+	if err == nil {
+		p.n = n
+	}
+	return nil // 解析不了就当 0，不让整条响应挂掉
 }
 
 // shodanSearch 调 Shodan host/search。
@@ -363,7 +406,7 @@ func splitHostPortLoose(s string) (string, int, bool) {
 
 // hunterSearch 调奇安信 Hunter 的 openApi/search。
 // Hunter 的 page_size 只接受 10/20/50/100，其它值直接报"页大小不合法"。
-func hunterSearch(ctx context.Context, key, query string, size int) []hostPort {
+func hunterSearch(ctx context.Context, key, query string, size int) ([]hostPort, error) {
 	pageSize := 10
 	if size > 10 {
 		pageSize = 20
@@ -376,19 +419,28 @@ func hunterSearch(ctx context.Context, key, query string, size int) []hostPort {
 		url.QueryEscape(key), url.QueryEscape(search), pageSize)
 	body, err := httpGetJSON(ctx, u, nil)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	var v struct {
-		Code int `json:"code"`
-		Data struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+		Data    struct {
 			Arr []struct {
 				IP   string `json:"ip"`
 				Port int    `json:"port"`
 			} `json:"arr"`
 		} `json:"data"`
 	}
-	if json.Unmarshal(body, &v) != nil || v.Code != 200 {
-		return nil
+	if json.Unmarshal(body, &v) != nil {
+		return nil, fmt.Errorf("Hunter 响应解析失败：%.120s", string(body))
+	}
+	// code=429 是限流、400 是查询语法问题——都要报出来，别当成"没找到"。
+	if v.Code != 200 {
+		msg := v.Message
+		if msg == "" {
+			msg = fmt.Sprintf("code %d", v.Code)
+		}
+		return nil, fmt.Errorf("Hunter 返回 %d：%s", v.Code, msg)
 	}
 	var out []hostPort
 	for _, a := range v.Data.Arr {
@@ -399,5 +451,5 @@ func hunterSearch(ctx context.Context, key, query string, size int) []hostPort {
 			}
 		}
 	}
-	return out
+	return out, nil
 }
