@@ -35,12 +35,27 @@ type LeakKey = {
   id: number; key_type: string; masked: string; url: string; found_at: string;
   source_kind?: string; repo?: string; verify_state?: string; verify_note?: string;
 };
+type ScanDiag = {
+  running: boolean;
+  rounds: number;
+  last_candidates: number;
+  last_fetched: number;
+  last_found: number;
+  last_error?: string;
+  stop_reason?: string;
+  rounds_no_gain?: number;
+};
 type ScanStatus = {
   running: boolean;
   last: { id: number; status: string; total: number; done: number; keys: number; note?: string } | null;
+  diag?: ScanDiag;
 };
 type KeyStats = { by_provider: Record<string, number>; by_source: Record<string, number>; total: number; verified: number };
-type GHStatus = { ready: boolean; running: boolean; found: number; dorks_done?: number; files_fetched?: number; last_error?: string };
+type GHStatus = {
+  ready: boolean; running: boolean; found: number;
+  dorks_done?: number; files_fetched?: number; last_error?: string;
+  seen_files?: number; dork_hits?: Record<string, number>;
+};
 
 const VERIFY_LABEL: Record<string, { text: string; cls: string }> = {
   valid: { text: "有效", cls: "bg-destructive/15 text-destructive border-destructive/30" },
@@ -99,15 +114,25 @@ export default function LLMHuntPage() {
   const [srcFilter, setSrcFilter] = React.useState("");
   const [q, setQ] = React.useState("");
   const [detail, setDetail] = React.useState<LeakKey | null>(null);
+  const diag = status.diag;
   const [revealed, setRevealed] = React.useState<Record<number, string>>({});
   const [copied, setCopied] = React.useState<number | null>(null);
 
+  // load 里的错误原来全被 .catch(() => {}) 吞掉：会话失效或后端报错时，页面
+  // 显示一张全 0 的空表，**没有任何提示**——用户会以为"本来就没东西"。
+  // 这里把第一个错误记下来，在页面顶部显式显示。
+  const [loadError, setLoadError] = React.useState<string | null>(null);
+
   const load = React.useCallback(() => {
-    api<ScanStatus>("/api/llmhunt/status").then(setStatus).catch(() => {});
-    api<KeyStats>("/api/llmhunt/key-stats").then(setStats).catch(() => {});
-    api<{ assets: Asset[] }>("/api/llmhunt/assets").then((r) => setAssets(r.assets ?? [])).catch(() => {});
-    api<{ keys: LeakKey[] }>("/api/llmhunt/keys").then((r) => setKeys(r.keys ?? [])).catch(() => {});
-    api<GHStatus>("/api/llmhunt/keyhunt/status").then(setGh).catch(() => {});
+    const fail = (e: unknown) => {
+      const msg = e instanceof Error ? e.message : String(e);
+      setLoadError((prev) => prev ?? msg);
+    };
+    api<ScanStatus>("/api/llmhunt/status").then((r) => { setStatus(r); setLoadError(null); }).catch(fail);
+    api<KeyStats>("/api/llmhunt/key-stats").then(setStats).catch(fail);
+    api<{ assets: Asset[] }>("/api/llmhunt/assets").then((r) => setAssets(r.assets ?? [])).catch(fail);
+    api<{ keys: LeakKey[] }>("/api/llmhunt/keys").then((r) => setKeys(r.keys ?? [])).catch(fail);
+    api<GHStatus>("/api/llmhunt/keyhunt/status").then(setGh).catch(fail);
   }, []);
 
   React.useEffect(() => {
@@ -267,6 +292,13 @@ export default function LLMHuntPage() {
         </Button>
       </div>
 
+      {loadError ? (
+        <div className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+          数据加载失败：{loadError}
+          <span className="ml-2 text-muted-foreground">（会话可能已失效，刷新页面重新登录）</span>
+        </div>
+      ) : null}
+
       {/* 统计带：宽屏上四张大卡会被拉成空盒子，改成一行紧凑指标 */}
       <div className="flex flex-wrap items-center gap-x-6 gap-y-2 rounded-lg border bg-card/50 px-4 py-2.5">
         <Stat label="泄漏密钥" value={stats?.total ?? 0} />
@@ -288,6 +320,28 @@ export default function LLMHuntPage() {
           }
           hint={last?.note || (last ? `#${last.id} · ${status.running ? "进行中" : last.status}` : "")}
         />
+        {diag && (diag.rounds > 0 || diag.last_error) ? (
+          <>
+            <Divider />
+            <Stat
+              label="本轮"
+              text={diag.rounds ? `第 ${diag.rounds} 轮` : "—"}
+              hint={
+                [
+                  diag.last_fetched ? `抓取 ${diag.last_fetched} 个 URL` : "",
+                  diag.last_found ? `新增 ${diag.last_found} 条 key` : "",
+                  diag.last_error ? `异常：${diag.last_error.replace(/^，/, "")}` : "",
+                ].filter(Boolean).join(" · ") || "尚无产出"
+              }
+            />
+          </>
+        ) : null}
+        {diag?.stop_reason ? (
+          <>
+            <Divider />
+            <Stat label="停止原因" text="自动停止" hint={diag.stop_reason} />
+          </>
+        ) : null}
       </div>
 
       {/* 控制台 */}
@@ -313,7 +367,12 @@ export default function LLMHuntPage() {
             <div className="rounded-lg border p-3">
               <p className="mb-2 text-xs font-medium text-muted-foreground">运行方式</p>
               <div className="flex flex-wrap gap-x-4 gap-y-2">
-                <Toggle checked={repeat} onChange={setRepeat} label="持续狩猎（5 分钟一轮）" title="直到手动停止" />
+                <Toggle
+                  checked={repeat}
+                  onChange={setRepeat}
+                  label="持续狩猎（5 分钟一轮）"
+                  title="连续 3 轮没有新增产出、或达到轮数上限时自动停止——测绘数据集是静态的，一直跑只会空烧配额"
+                />
                 <Toggle checked={autoVerify} onChange={setAutoVerify} label="自动验证可用性" title="每轮对新增 key 各发一次免费只读请求（仅列模型），上限 10 条" />
               </div>
             </div>
@@ -334,7 +393,16 @@ export default function LLMHuntPage() {
               {showAdvanced ? "收起目标" : "指定目标…"}
             </Button>
             <span className="text-xs text-muted-foreground">
-              {gh ? `GitHub：${gh.ready ? (gh.running ? "运行中" : "就绪") : "未配置"}${gh.files_fetched ? ` · 抓取 ${gh.files_fetched} 文件` : ""}${gh.last_error ? ` · ${gh.last_error.slice(0, 40)}` : ""}` : ""}
+              {gh
+                ? `GitHub：${gh.ready ? (gh.running ? "运行中" : "就绪") : "未配置"}` +
+                  `${gh.dorks_done ? ` · 搜索词 ${gh.dorks_done}/8` : ""}` +
+                  `${gh.files_fetched ? ` · 抓取 ${gh.files_fetched} 文件` : ""}` +
+                  // 跨轮记忆：已处理过的文件不再重抓，所以"抓取数"远小于
+                  // "搜索结果数"是正常的，界面要说清楚，否则看着像没干活。
+                  `${gh.seen_files ? ` · 累计已处理 ${gh.seen_files} 文件` : ""}` +
+                  `${gh.found ? ` · 命中 ${gh.found} 条` : ""}` +
+                  `${gh.last_error ? ` · ${gh.last_error.slice(0, 40)}` : ""}`
+                : ""}
             </span>
           </div>
 

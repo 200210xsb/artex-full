@@ -47,6 +47,12 @@ type GitHubKeyHunter struct {
 	dorksDone    int
 	filesFetched int
 	lastErr      string
+	// seenFiles 是**跨轮**的已抓文件记忆（仓库+路径）。GitHub 代码搜索每次
+	// 都会返回同一批结果，不记的话每轮都把同样的文件重抓一遍——配额白烧，
+	// 而且新出现的文件要等下一轮才排在后面。key 用 "仓库|路径"。
+	seenFiles map[string]bool
+	// dorkHits 记录每个搜索词命中多少条，用来判断哪条 dork 值得继续用。
+	dorkHits map[string]int
 }
 
 // NewGitHubKeyHunter 构造。token 为空时从环境或 /root/.artex-gh-token 读。
@@ -59,7 +65,12 @@ func NewGitHubKeyHunter(pg *db.DB, token string) *GitHubKeyHunter {
 			token = strings.TrimSpace(string(b))
 		}
 	}
-	return &GitHubKeyHunter{pg: pg, token: token}
+	return &GitHubKeyHunter{
+		pg:        pg,
+		token:     token,
+		seenFiles: map[string]bool{},
+		dorkHits:  map[string]int{},
+	}
 }
 
 // SetProxy 注入 GitHub 访问的出口代理（server 启动时用全局代理调用一次）。
@@ -167,6 +178,24 @@ func (h *GitHubKeyHunter) Progress() (dorks, files, found int, lastErr string) {
 	return h.dorksDone, h.filesFetched, h.found, h.lastErr
 }
 
+// DorkHits 返回每个搜索词命中的文件数（用来判断哪条 dork 有效）。
+func (h *GitHubKeyHunter) DorkHits() map[string]int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	out := make(map[string]int, len(h.dorkHits))
+	for k, v := range h.dorkHits {
+		out[k] = v
+	}
+	return out
+}
+
+// SeenFiles 返回已处理过的文件数（跨轮记忆的规模）。
+func (h *GitHubKeyHunter) SeenFiles() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return len(h.seenFiles)
+}
+
 // Stop 取消本轮。
 func (h *GitHubKeyHunter) Stop() {
 	h.mu.Lock()
@@ -204,6 +233,7 @@ func (h *GitHubKeyHunter) run(ctx context.Context) {
 		if err != nil {
 			h.lastErr = err.Error()
 		}
+		h.dorkHits[dork] = len(results)
 		h.mu.Unlock()
 		if err != nil {
 			log.Printf("[keyhunt] 搜索 %q 失败: %v", dork, err)
@@ -217,6 +247,16 @@ func (h *GitHubKeyHunter) run(ctx context.Context) {
 				continue
 			}
 			seenRepo[r.URL] = true
+			// 跨轮记忆：这一轮已经抓过的文件（成功与否都算"处理过"，GitHub 的
+			// 内容不会自己变），下一轮不再重抓，把配额留给新文件。
+			fileKey := r.Repo + "|" + r.Path
+			h.mu.Lock()
+			already := h.seenFiles[fileKey]
+			h.seenFiles[fileKey] = true
+			h.mu.Unlock()
+			if already {
+				continue
+			}
 			fetched++
 			h.mu.Lock()
 			h.filesFetched++

@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -68,6 +69,13 @@ type Options struct {
 	// 只用于积累发现；不会自动验证/使用任何 key。
 	Repeat      bool
 	RepeatEvery time.Duration
+	// MaxRounds 是持续狩猎的轮数上限（<=0 表示用默认值）。
+	// 没有上限的话，持续狩猎可以一直跑下去——而测绘数据集是静态的，跑久了
+	// 只会反复拿到同一批候选，既烧配额又被限流。
+	MaxRounds int
+	// StopAfterNoGain 是"连续多少轮没有新增产出就自动停"的阈值（<=0 用默认值）。
+	// 产出 = 新增候选或新增 key。连续没有产出说明这一轮已经在空转了。
+	StopAfterNoGain int
 	// AutoVerify 开启后，每轮狩猎结束会对**新发现**的 key 各发一次免费只读请求，
 	// 判断有效/无效（每轮上限 10 条）。默认关；只应在你有权验证的范围里开。
 	AutoVerify bool
@@ -78,6 +86,13 @@ type Options struct {
 	Proxy string
 	Note  string
 }
+
+const (
+	// leakDefaultMaxRounds 是持续狩猎默认轮数上限（每轮 5 分钟 → 默认 2 小时）。
+	leakDefaultMaxRounds = 24
+	// leakDefaultNoGainLimit 是"连续多少轮无产出就自动停"的默认阈值。
+	leakDefaultNoGainLimit = 3
+)
 
 // Discoverer 执行一次搜索并返回结果 URL。由上层注入（复用 ARTEX 已有的
 // web_search 后端），llmhunt 自己不关心是 ddgs/brave/tavily。
@@ -96,8 +111,10 @@ type Scanner struct {
 	proxy string
 	// lastGatewayToken 是最近一次网关默认口令登录成功的 token（读渠道用）。
 	lastGatewayToken string
-	// seenLeak 是泄漏狩猎的跨轮记忆：已抓过的 URL 不再抓（每轮候选 90% 重复）。
-	seenLeak map[string]bool
+	// seenLeak 是泄漏狩猎的跨轮记忆：**抓成功过**的 URL → 抓取时间。
+	// 记时间而不是记"见过"，是为了区分"抓过了"与"只是被列进候选"——
+	// 后者不该拦掉下一轮（失败要能重试），前者到期后（TTL）也允许重抓。
+	seenLeak map[string]time.Time
 
 	mu      sync.Mutex
 	running bool
@@ -106,6 +123,72 @@ type Scanner struct {
 	done    int
 	assets  int
 	keys    int
+
+	// 诊断：让界面能说清楚"这轮为什么没产出"，而不是只显示一个"运行中"。
+	lastRound    int    // 已跑轮数
+	lastCands    int    // 上一轮候选 URL 数
+	lastFetched  int    // 上一轮实际抓取数
+	lastFound    int    // 上一轮新增 key 数
+	lastErr      string // 上一轮的失败原因（限流等）
+	stopReason   string // 自动停止的原因（连续无产出 / 达到轮数上限 / 手动停止）
+	roundsNoGain int    // 连续多少轮没有新增产出
+}
+
+// pruneSeenLeak 修剪跨轮记忆：丢掉过期条目，表太大时再砍掉最旧的一半。
+// 记忆表是给"这轮别重复抓"用的，长到几千条就该收一收，否则每轮 add() 都要全表扫。
+func (s *Scanner) pruneSeenLeak() {
+	cut := time.Now().Add(-leakSeenTTL)
+	for u, at := range s.seenLeak {
+		if at.Before(cut) {
+			delete(s.seenLeak, u)
+		}
+	}
+	if len(s.seenLeak) <= leakSeenMax {
+		return
+	}
+	type kv struct {
+		u string
+		t time.Time
+	}
+	items := make([]kv, 0, len(s.seenLeak))
+	for u, at := range s.seenLeak {
+		items = append(items, kv{u, at})
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].t.Before(items[j].t) })
+	for _, it := range items[:len(items)/2] {
+		delete(s.seenLeak, it.u)
+	}
+}
+
+// Diagnostics 是扫描器的诊断信息：界面要能说清楚"这轮为什么没产出"，
+// 而不是只显示一个"运行中"。老实现只有一个 running 布尔值，用户看到
+// "运行中"却什么都没发生，完全无从判断是测绘没数据、还是被限流、还是
+// 候选集已耗尽。
+type Diagnostics struct {
+	Running        bool   `json:"running"`
+	Rounds         int    `json:"rounds"`
+	LastCandidates int    `json:"last_candidates"`
+	LastFetched    int    `json:"last_fetched"`
+	LastFound      int    `json:"last_found"`
+	LastError      string `json:"last_error,omitempty"`
+	StopReason     string `json:"stop_reason,omitempty"`
+	RoundsNoGain   int    `json:"rounds_no_gain,omitempty"`
+}
+
+// Diagnostics 读取当前扫描的诊断信息。
+func (s *Scanner) Diagnostics() Diagnostics {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return Diagnostics{
+		Running:        s.running,
+		Rounds:         s.lastRound,
+		LastCandidates: s.lastCands,
+		LastFetched:    s.lastFetched,
+		LastFound:      s.lastFound,
+		LastError:      s.lastErr,
+		StopReason:     s.stopReason,
+		RoundsNoGain:   s.roundsNoGain,
+	}
 }
 
 // New 构造扫描器。
@@ -224,11 +307,20 @@ func (s *Scanner) run(ctx context.Context, scanID int64, opts Options) {
 		if every <= 0 {
 			every = 5 * time.Minute
 		}
+		maxRounds := opts.MaxRounds
+		if maxRounds <= 0 {
+			maxRounds = leakDefaultMaxRounds
+		}
+		noGainLimit := opts.StopAfterNoGain
+		if noGainLimit <= 0 {
+			noGainLimit = leakDefaultNoGainLimit
+		}
 		for round := 1; ; round++ {
 			if ctx.Err() != nil {
 				break
 			}
-			fetched, found := s.huntLeaks(ctx)
+			before := s.keysNow()
+			fetched, found, lerr := s.huntLeaks(ctx)
 			verified := ""
 			if opts.AutoVerify && found > 0 {
 				t, okV := s.VerifyNewKeys(ctx, 10)
@@ -236,10 +328,43 @@ func (s *Scanner) run(ctx context.Context, scanID int64, opts Options) {
 					verified = fmt.Sprintf("，自动验证 %d 条（有效 %d）", t, okV)
 				}
 			}
-			s.logf("泄漏狩猎第 %d 轮：抓取 %d 个 URL，命中 %d 条 key（累计 %d）%s", round, fetched, found, s.keysNow(), verified)
-			note := fmt.Sprintf("第 %d 轮 · 抓取 %d 个 URL · 本轮命中 %d · 累计 %d 条 key%s",
-				round, fetched, found, s.keysNow(), verified)
+			// 诊断：这一轮到底发生了什么，界面要能显示出来。
+			errText := ""
+			if lerr != nil {
+				errText = "，" + lerr.Error()
+			}
+			s.logf("泄漏狩猎第 %d 轮：抓取 %d 个 URL，命中 %d 条 key（累计 %d）%s%s", round, fetched, found, s.keysNow(), verified, errText)
+
+			gained := found > 0 || s.keysNow() > before
+			noGain := 0
+			stopReason := ""
+			if !gained {
+				noGain = s.roundsNoGain + 1
+			}
+			switch {
+			case round >= maxRounds:
+				stopReason = fmt.Sprintf("达到轮数上限（%d 轮）", maxRounds)
+			case noGain >= noGainLimit:
+				stopReason = fmt.Sprintf("连续 %d 轮没有新增产出，自动停止（测绘数据集已无新料，可手动再开）", noGain)
+			}
+			note := fmt.Sprintf("第 %d 轮 · 抓取 %d 个 URL · 本轮命中 %d · 累计 %d 条 key%s%s",
+				round, fetched, found, s.keysNow(), verified, errText)
+			if stopReason != "" {
+				note += " · " + stopReason
+			}
+			s.mu.Lock()
+			s.lastRound, s.lastCands, s.lastFetched, s.lastFound = round, fetched, fetched, found
+			s.lastErr = errText
+			s.roundsNoGain = noGain
+			if stopReason != "" {
+				s.stopReason = stopReason
+			}
+			s.mu.Unlock()
 			_ = s.pg.UpdateLLMScan(scanID, fetched, s.assets, s.keys, "", note)
+			if stopReason != "" {
+				s.logf("持续狩猎结束：%s", stopReason)
+				break
+			}
 			if !opts.Repeat {
 				break
 			}

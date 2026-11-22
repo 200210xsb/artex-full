@@ -158,6 +158,7 @@ func SpatialTargets(ctx context.Context, perVendor int) ([]Target, error) {
 		perVendor = 10
 	}
 	var out []Target
+	var lastErr error
 	seen := map[string]bool{}
 	for _, q := range spatialQueries {
 		var hosts []hostPort
@@ -165,7 +166,11 @@ func SpatialTargets(ctx context.Context, perVendor int) ([]Target, error) {
 			hosts = append(hosts, fofaSearch(ctx, k, q.fofa, perVendor)...)
 		}
 		if k.Quake != "" && q.quake != "" && len(hosts) < perVendor {
-			hosts = append(hosts, quakeSearch(ctx, k.Quake, q.quake, perVendor)...)
+			got, qerr := quakeSearch(ctx, k.Quake, q.quake, perVendor)
+			if qerr != nil {
+				lastErr = qerr
+			}
+			hosts = append(hosts, got...)
 		}
 		if k.Shodan != "" && q.shodan != "" && len(hosts) < perVendor {
 			hosts = append(hosts, shodanSearch(ctx, k.Shodan, q.shodan, perVendor)...)
@@ -185,7 +190,7 @@ func SpatialTargets(ctx context.Context, perVendor int) ([]Target, error) {
 			}
 		}
 	}
-	return out, nil
+	return out, lastErr
 }
 
 type hostPort struct {
@@ -229,26 +234,38 @@ func fofaSearch(ctx context.Context, k providerKeys, query string, size int) []h
 }
 
 // quakeSearch 调 Quake 的 search/quake_service。
-func quakeSearch(ctx context.Context, token, query string, size int) []hostPort {
+// 返回错误（限流/鉴权失败/网络）而不是静默吞掉——调用方要能区分"没找到"和
+// "这次没查成"，否则一轮空转看起来像"测绘没结果"。
+func quakeSearch(ctx context.Context, token, query string, size int) ([]hostPort, error) {
 	payload, _ := json.Marshal(map[string]any{"query": query, "start": 0, "size": size, "include": []string{"ip", "port"}})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://quake.360.net/api/v3/search/quake_service", strings.NewReader(string(payload)))
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	req.Header.Set("content-type", "application/json")
 	req.Header.Set("X-QuakeToken", token)
 	body, err := doJSON(req)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	var v struct {
-		Data []struct {
+		Code    json.Number `json:"code"`
+		Message string      `json:"message"`
+		Data    []struct {
 			IP   string `json:"ip"`
 			Port int    `json:"port"`
 		} `json:"data"`
 	}
 	if json.Unmarshal(body, &v) != nil {
-		return nil
+		return nil, fmt.Errorf("Quake 响应解析失败")
+	}
+	// Quake 用 code 表达业务错误：0=成功，其余（限流/配额/鉴权）都要报出来。
+	if v.Code != "" && v.Code != "0" {
+		msg := v.Message
+		if msg == "" {
+			msg = "code " + v.Code.String()
+		}
+		return nil, fmt.Errorf("Quake 返回 %s：%s", v.Code.String(), msg)
 	}
 	var out []hostPort
 	for _, d := range v.Data {
@@ -256,7 +273,7 @@ func quakeSearch(ctx context.Context, token, query string, size int) []hostPort 
 			out = append(out, hostPort{d.IP, d.Port})
 		}
 	}
-	return out
+	return out, nil
 }
 
 // shodanSearch 调 Shodan host/search。

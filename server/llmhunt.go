@@ -87,6 +87,10 @@ func (s *Server) llmKeyHuntStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{
 		"ready": h.Ready(), "running": h.Running(), "found": found,
 		"dorks_done": dorks, "files_fetched": files, "last_error": lastErr,
+		// 跨轮记忆与命中统计：界面要能看出"这一轮抓的全是老文件"而不是
+		// "没产出"，以及哪条搜索词有效。
+		"seen_files": h.SeenFiles(),
+		"dork_hits":  h.DorkHits(),
 	})
 }
 
@@ -151,17 +155,19 @@ func (s *Server) llmSearchDiscoverer() llmhunt.Discoverer {
 // 刻意**不做**网段/端口段扫描：那既吵又容易越界，目标必须由操作者给出。
 func (s *Server) llmHuntScan(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Seeds         string `json:"seeds"`       // 每行 host / host:port / URL
-		FromAssets    bool   `json:"from_assets"` // 从资产库取（授权资产）
-		UseSearch     bool   `json:"use_search"`  // 用搜索引擎发现候选
-		Dorks         string `json:"dorks"`       // 自定义搜索词（每行一个；空=内置）
-		MaxFromSearch int    `json:"max_from_search"`
-		AllowAuth     *bool  `json:"allow_auth"` // 默认口令探测：未传时默认开（显式 false 才关）
-		HuntLeaks     bool   `json:"hunt_leaks"`
-		Repeat        bool   `json:"repeat"` // 持续狩猎（每 5 分钟一轮，直到停止）
-		RepeatMinutes int    `json:"repeat_minutes"`
-		AutoVerify    bool   `json:"auto_verify"` // 每轮自动验证新 key（默认关） // 先找"响应里已含 key"的 URL（Hunter/Quake）
-		MaxTargets    int    `json:"max_targets"`
+		Seeds           string `json:"seeds"`       // 每行 host / host:port / URL
+		FromAssets      bool   `json:"from_assets"` // 从资产库取（授权资产）
+		UseSearch       bool   `json:"use_search"`  // 用搜索引擎发现候选
+		Dorks           string `json:"dorks"`       // 自定义搜索词（每行一个；空=内置）
+		MaxFromSearch   int    `json:"max_from_search"`
+		AllowAuth       *bool  `json:"allow_auth"` // 默认口令探测：未传时默认开（显式 false 才关）
+		HuntLeaks       bool   `json:"hunt_leaks"`
+		Repeat          bool   `json:"repeat"` // 持续狩猎（每 5 分钟一轮，直到停止）
+		RepeatMinutes   int    `json:"repeat_minutes"`
+		MaxRounds       int    `json:"max_rounds"`         // 持续狩猎轮数上限（<=0 用默认）
+		StopAfterNoGain int    `json:"stop_after_no_gain"` // 连续多少轮无产出就停（<=0 用默认）
+		AutoVerify      bool   `json:"auto_verify"`        // 每轮自动验证新 key（默认关） // 先找"响应里已含 key"的 URL（Hunter/Quake）
+		MaxTargets      int    `json:"max_targets"`
 		// Confirm 是自动验证的显式确认位：自动验证 = 用别人泄漏的凭据向厂商发请求，
 		// 与 /api/llmhunt/keys/verify 是同一性质的动作，所以同一道门。
 		Confirm bool `json:"confirm"`
@@ -226,6 +232,8 @@ func (s *Server) llmHuntScan(w http.ResponseWriter, r *http.Request) {
 		Repeat:          req.Repeat,
 		AutoVerify:      req.AutoVerify,
 		RepeatEvery:     time.Duration(maxInt(req.RepeatMinutes, 5)) * time.Minute,
+		MaxRounds:       req.MaxRounds,
+		StopAfterNoGain: req.StopAfterNoGain,
 		// 探测目标走全局代理出口（不暴露 VPS 自己的 IP）。
 		Proxy: s.m.GlobalProxy(),
 	})
@@ -248,6 +256,9 @@ func (s *Server) llmHuntStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{
 		"running": s.llmScanner().Running(),
 		"last":    last,
+		// 诊断：这轮跑了多久、候选多少、失败原因、为什么停。
+		// 没有它，界面只能显示"运行中"，用户无从判断是在空转还是被限流。
+		"diag": s.llmScanner().Diagnostics(),
 	})
 }
 

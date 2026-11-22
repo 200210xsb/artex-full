@@ -2,6 +2,7 @@ package llmhunt
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"strings"
@@ -24,6 +25,11 @@ const (
 	leakPerHostGap = 250 * time.Millisecond
 	// leakMaxScripts 是每个泄漏页面上再跟进的同源脚本数：key 常在内联的 JS 里。
 	leakMaxScripts = 2
+	// leakSeenTTL 是「已成功抓过」的 URL 记忆有效期：到期后允许重抓。
+	// 泄漏页面会更新（换了 key、改了配置），永久跳过等于把还活着的目标丢掉。
+	leakSeenTTL = 24 * time.Hour
+	// leakSeenMax 是记忆表上限，超了就剪掉最旧的一半。
+	leakSeenMax = 4000
 )
 
 // leakQuery 是一条"找泄漏"的查询。
@@ -57,38 +63,52 @@ var quakeLeakQueries = []leakQuery{
 // leakConfigPaths 是 Quake 命中后值得一试的配置路径（每台 2 个，够用且不吵）。
 var leakConfigPaths = []string{"/.env", "/config.js"}
 
-// huntLeaks 收集候选 URL 后并发抓取，返回 (抓取数, 新增 key 数)。
-func (s *Scanner) huntLeaks(ctx context.Context) (int, int) {
+// huntLeaks 收集候选 URL 后并发抓取，返回 (抓取数, 新增 key 数, 首个失败原因)。
+func (s *Scanner) huntLeaks(ctx context.Context) (int, int, error) {
 	k := loadProviderKeys()
 	if k.Hunter == "" && k.Quake == "" {
 		s.logf("未配置 Hunter/Quake key，跳过泄漏文件狩猎")
-		return 0, 0
+		return 0, 0, errors.New("未配置 Hunter/Quake key")
 	}
 
 	// ① 先把候选 URL 全收集出来（这一步很快：只打测绘 API）
-	// 跨轮记忆：Quake/Hunter 的候选集每轮几乎相同，没有这层记忆的话 90% 的
-	// 请求是白发的（实测 6 轮抓的都是同一批 URL）。已抓过的直接跳过，
-	// 只有测绘数据集更新出现的新 URL 才会真正发请求。
+	//
+	// 跨轮记忆：**只有真正抓成功过的** URL 才算"已处理"，而且带 TTL（24 小时）。
+	//
+	// 旧实现是在**收集阶段**就把候选标成"已抓过"，于是第 1 轮之后候选集被自己
+	// 清空：Hunter/Quake 查的是静态数据集，每轮返回同一批 URL，全被跳过 →
+	// 后面每一轮都是"抓取 0 个 URL"（线上实测连续空转了 477 轮），白烧测绘 API
+	// 配额，还把自己打到限流。抓失败（超时/被拒）不该算"已处理"，下一轮要能重试。
 	if s.seenLeak == nil {
-		s.seenLeak = map[string]bool{}
+		s.seenLeak = map[string]time.Time{}
 	}
+	s.pruneSeenLeak()
 	cands := make([]string, 0, leakMaxURL)
 	seen := map[string]bool{}
 	add := func(u string) {
-		if u == "" || seen[u] || s.seenLeak[u] || len(cands) >= leakMaxURL {
+		if u == "" || seen[u] || len(cands) >= leakMaxURL {
 			return
 		}
+		if s.leakAlreadyHandled(u) {
+			return // 最近成功抓过：这轮不重复发请求
+		}
 		seen[u] = true
-		s.seenLeak[u] = true
 		cands = append(cands, u)
 	}
 
+	var lastErr error
 	if k.Hunter != "" {
 		for _, lq := range hunterLeakQueries {
 			if ctx.Err() != nil {
 				break
 			}
-			for _, u := range hunterLeakURLs(ctx, k.Hunter, lq.query, leakPerQuery) {
+			urls, herr := hunterLeakURLs(ctx, k.Hunter, lq.query, leakPerQuery)
+			if herr != nil {
+				lastErr = herr
+				s.logf("泄漏狩猎：Hunter 查询失败（%s）：%v", lq.label, herr)
+				break // 限流/配额问题就别继续打剩下几条了
+			}
+			for _, u := range urls {
 				add(u)
 			}
 		}
@@ -98,7 +118,13 @@ func (s *Scanner) huntLeaks(ctx context.Context) (int, int) {
 			if ctx.Err() != nil {
 				break
 			}
-			for _, hp := range quakeSearch(ctx, k.Quake, lq.query, leakPerQuery) {
+			hosts, qerr := quakeSearch(ctx, k.Quake, lq.query, leakPerQuery)
+			if qerr != nil {
+				lastErr = qerr
+				s.logf("泄漏狩猎：Quake 查询失败（%s）：%v", lq.label, qerr)
+				continue
+			}
+			for _, hp := range hosts {
 				for _, p := range leakConfigPaths {
 					add(fmt.Sprintf("http://%s:%d%s", hp.host, hp.port, p))
 				}
@@ -106,8 +132,12 @@ func (s *Scanner) huntLeaks(ctx context.Context) (int, int) {
 		}
 	}
 	if len(cands) == 0 {
-		s.logf("泄漏狩猎：测绘未返回候选 URL")
-		return 0, 0
+		if lastErr != nil {
+			s.logf("泄漏狩猎：没有候选 URL（%v）", lastErr)
+		} else {
+			s.logf("泄漏狩猎：测绘未返回候选 URL")
+		}
+		return 0, 0, lastErr
 	}
 	s.logf("泄漏狩猎：%d 个候选 URL，开始并发抓取（%d 路）", len(cands), leakWorkers)
 
@@ -167,11 +197,13 @@ func (s *Scanner) huntLeaks(ctx context.Context) (int, int) {
 			fetched++
 			mu.Unlock()
 			if st == 403 || st == 418 || st == 429 {
-				return // 站点在拒绝：这台不再碰
+				return // 站点在拒绝：这台不再碰（不记入"已处理"，下轮可再试）
 			}
 			if st != 200 || body == "" {
-				return
+				return // 抓失败：同样不记，下一轮重试
 			}
+			// 真正抓到了才记"已处理"，并记时间（TTL 到期后允许重抓）。
+			s.markLeakHandled(raw)
 			// 文档/示例页直接跳过：这类页面里的 key 全是教程占位串，
 			// 验出来全是 401，还占验证预算。
 			if looksLikeDocPage(body) {
@@ -195,7 +227,29 @@ func (s *Scanner) huntLeaks(ctx context.Context) (int, int) {
 		}(u)
 	}
 	wg.Wait()
-	return fetched, found
+	return fetched, found, lastErr
+}
+
+// leakAlreadyHandled 报告这个 URL 最近是否已经成功抓过（TTL 内不再重复发请求）。
+//
+// 语义要点：只有**抓成功**的 URL 才会进记忆表；抓失败（超时/被拒/非 200）
+// 不进表，所以下一轮还会重试。记忆带 TTL：泄漏页面会更新，永久跳过等于把
+// 还活着的目标丢掉。
+func (s *Scanner) leakAlreadyHandled(u string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	at, ok := s.seenLeak[u]
+	return ok && time.Since(at) < leakSeenTTL
+}
+
+// markLeakHandled 记下"这个 URL 抓过了"（带时间，用于 TTL）。
+func (s *Scanner) markLeakHandled(u string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.seenLeak == nil {
+		s.seenLeak = map[string]time.Time{}
+	}
+	s.seenLeak[u] = time.Now()
 }
 
 // hostOf 取 URL 的主机（没有端口），用于同一主机的串行保护。
@@ -208,7 +262,7 @@ func hostOf(raw string) string {
 }
 
 // hunterLeakURLs 跑一条 Hunter 查询，取出结果里的 URL。
-func hunterLeakURLs(ctx context.Context, key, query string, size int) []string {
+func hunterLeakURLs(ctx context.Context, key, query string, size int) ([]string, error) {
 	pageSize := 10
 	if size > 10 {
 		pageSize = 20
@@ -218,18 +272,29 @@ func hunterLeakURLs(ctx context.Context, key, query string, size int) []string {
 		url.QueryEscape(key), url.QueryEscape(search), pageSize)
 	body, err := httpGetJSON(ctx, u, nil)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	var v struct {
-		Code int `json:"code"`
+		Code int    `json:"code"`
+		Msg  string `json:"message"`
 		Data struct {
 			Arr []struct {
 				URL string `json:"url"`
 			} `json:"arr"`
 		} `json:"data"`
 	}
-	if jsonUnmarshal(body, &v) != nil || v.Code != 200 {
-		return nil
+	if jsonUnmarshal(body, &v) != nil {
+		return nil, fmt.Errorf("Hunter 响应解析失败")
+	}
+	// Hunter 用 body 里的 code 表达业务错误：429 是限流（"请求太多啦"），
+	// 400 是查询语法问题。老实现一律当成"没结果"，于是限流看起来像"这轮没料"，
+	// 持续狩猎会一直空转并把自己打死在限流里。
+	if v.Code != 200 {
+		msg := v.Msg
+		if msg == "" {
+			msg = fmt.Sprintf("code %d", v.Code)
+		}
+		return nil, fmt.Errorf("Hunter 返回 %d：%s", v.Code, msg)
 	}
 	var out []string
 	for _, a := range v.Data.Arr {
@@ -240,7 +305,7 @@ func hunterLeakURLs(ctx context.Context, key, query string, size int) []string {
 			}
 		}
 	}
-	return out
+	return out, nil
 }
 
 // docPageWords 命中越多越像文档/教程页：这类页面里的 key 是讲解用的假串。
