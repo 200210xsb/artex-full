@@ -147,7 +147,17 @@ func (m *Manager) Ensure(ctx context.Context, p Profile) (string, error) {
 		inst.lastUsed = time.Now()
 		return "socks5://" + inst.socksAddr, nil
 	}
-	if err := m.bringUp(ctx, inst); err != nil {
+	// bringUp 用**独立的后台 ctx**，不继承调用方的 ctx：
+	// UI 手动连接传的是 HTTP 请求 ctx——浏览器超时/关页就会 cancel，把建到一半的
+	// 隧道打死（实测报 context canceled，UI 显示"异常"）。任务侧 ProxyAddrFor
+	// 传的是 2 分钟超时 ctx，同样会在慢建链时误杀。隧道一旦开始建立就应该
+	// 跑完（monitor 会做后续健康检查），调用方提前断开不应影响它。
+	// 调用方如果不想等，可以自行断开请求——隧道继续在后台建，下次 Ensure 命中
+	// StateUp 直接返回。
+	buildCtx, buildCancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer buildCancel()
+	_ = ctx // 调用方提前放弃等待不影响建链：buildCtx 独立于调用方
+	if err := m.bringUp(buildCtx, inst); err != nil {
 		inst.state = StateError
 		inst.lastErr = err.Error()
 		return "", err
