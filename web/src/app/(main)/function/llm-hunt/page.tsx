@@ -117,6 +117,9 @@ export default function LLMHuntPage() {
   }, [load]);
 
   const startHunt = async () => {
+    // 自动验证 = 用别人泄漏的凭据向厂商发只读请求，和「验证待验密钥」是同一性质
+    // 的动作，服务端要求显式 confirm=true，这里先问一句。
+    if (autoVerify && !window.confirm("自动验证会用每条密钥向厂商发一次免费只读请求（仅列模型，不推理、不重试）。只应在你有权验证的密钥上使用。继续？")) return;
     setBusy(true);
     try {
       await api("/api/llmhunt/scan", {
@@ -124,6 +127,7 @@ export default function LLMHuntPage() {
         body: JSON.stringify({
           seeds, from_assets: fromAssets, use_search: useSearch, hunt_leaks: huntLeaks,
           allow_auth: allowAuth, repeat, repeat_minutes: 5, auto_verify: autoVerify,
+          confirm: autoVerify,
         }),
       });
       toast.success(repeat ? "已开始持续狩猎（每 5 分钟一轮）" : "已开始狩猎");

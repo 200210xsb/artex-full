@@ -58,7 +58,8 @@ type Options struct {
 	// MaxFromSearch 限制搜索发现的目标数（默认 30）。
 	MaxFromSearch int
 	// AllowAuthChecks 允许"默认口令探测"（每个平台最多 2 组，失败即止）。
-	// 默认关闭：这是唯一会用 POST 的动作，只适合在明确授权的目标上开。
+	// 默认**开**（见 e91cf3b：这是实际使用的默认）；这是唯一会用 POST 的动作，
+	// 只适合在明确授权的目标上开。调用方想关就显式传 false。
 	AllowAuthChecks bool
 	// HuntLeaks 先跑"泄漏文件狩猎"：用 Hunter/Quake 找响应体里本来就含 key 的 URL。
 	// 这是拿 key 最短的路径，优先级高于"先找实例再猜路径"。
@@ -90,6 +91,9 @@ type Scanner struct {
 	allowAuth bool
 	// scanClient 是本次扫描专用的 client（按 Options.Proxy 构造，空则与 client 相同）。
 	scanClient *http.Client
+	// proxy 是本次扫描的出口代理原文：自动验证要用它构造 Verifier
+	//（厂商 API 在墙外，直连必然超时，见 Verifier.SetProxy 的说明）。
+	proxy string
 	// lastGatewayToken 是最近一次网关默认口令登录成功的 token（读渠道用）。
 	lastGatewayToken string
 	// seenLeak 是泄漏狩猎的跨轮记忆：已抓过的 URL 不再抓（每轮候选 90% 重复）。
@@ -168,6 +172,7 @@ func (s *Scanner) Start(opts Options) (int64, error) {
 	s.mu.Lock()
 	s.scanID = id
 	s.allowAuth = opts.AllowAuthChecks
+	s.proxy = strings.TrimSpace(opts.Proxy)
 	s.scanClient = s.clientFor(opts.Proxy)
 	s.mu.Unlock()
 

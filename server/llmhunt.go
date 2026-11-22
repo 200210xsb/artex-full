@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"log"
 	"net/http"
 	"strconv"
@@ -161,8 +162,15 @@ func (s *Server) llmHuntScan(w http.ResponseWriter, r *http.Request) {
 		RepeatMinutes int    `json:"repeat_minutes"`
 		AutoVerify    bool   `json:"auto_verify"` // 每轮自动验证新 key（默认关） // 先找"响应里已含 key"的 URL（Hunter/Quake）
 		MaxTargets    int    `json:"max_targets"`
+		// Confirm 是自动验证的显式确认位：自动验证 = 用别人泄漏的凭据向厂商发请求，
+		// 与 /api/llmhunt/keys/verify 是同一性质的动作，所以同一道门。
+		Confirm bool `json:"confirm"`
 	}
 	if err := decode(r, &req); err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	if err := checkAutoVerifyConfirm(req.AutoVerify, req.Confirm); err != nil {
 		writeErr(w, 400, err.Error())
 		return
 	}
@@ -311,6 +319,19 @@ func (s *Server) llmHuntDeleteAsset(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]any{"deleted": id})
+}
+
+// checkAutoVerifyConfirm 是自动验证的确认门。
+//
+// 自动验证会用**别人泄漏的凭据**向厂商发一次只读请求——与
+// /api/llmhunt/keys/verify 是同一性质的动作，因此同一道门：必须显式确认。
+// 之前只有手动验证接口有这道门，扫描接口的 auto_verify 直接就能触发同样的
+// 行为，等于把确认绕开了。
+func checkAutoVerifyConfirm(autoVerify, confirm bool) error {
+	if autoVerify && !confirm {
+		return errors.New("需要显式确认（confirm=true）：自动验证会用该密钥向厂商发起一次只读请求")
+	}
+	return nil
 }
 
 // maxInt 返回较大的那个（用于给重复间隔一个下限）。

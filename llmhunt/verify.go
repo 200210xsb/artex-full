@@ -172,6 +172,11 @@ func (v *Verifier) verifyOne(ctx context.Context, vt verifyTarget, key string) (
 // 只用于 OpenAI / Anthropic 这类有免费只读接口（列模型）的厂商；不发推理请求。
 func (s *Scanner) VerifyNewKeys(ctx context.Context, limit int) (tried, valid int) {
 	v := NewVerifier(s.pg)
+	// 必须带上扫描用的出口代理：厂商 API（api.openai.com / api.anthropic.com …）
+	// 在墙内直连必然超时，会把"密钥有效"误判成"请求失败（网络/超时）"——
+	// 正是 Verifier.SetProxy 注释里记的那个坑。手动验证走 server 注入的全局
+	// 代理，自动验证以前漏了，于是每条都假阴性。
+	v.SetProxy(s.proxy)
 	t, ok, err := v.VerifyPending(ctx, limit)
 	if err != nil {
 		s.logf("自动验证失败: %v", err)
