@@ -7,6 +7,7 @@ import (
 
 	"github.com/Autumn-27/artex/agent"
 	"github.com/Autumn-27/artex/db"
+	"github.com/Autumn-27/artex/internal/testdb"
 	actool "github.com/Autumn-27/norma/tool"
 )
 
@@ -26,6 +27,11 @@ func TestWireTools(t *testing.T) {
 	if err != nil {
 		t.Skipf("no database config (%v) — skipping", err)
 	}
+	guarded, gerr := testdb.Guard(dsn)
+	if gerr != nil {
+		t.Skipf("skipping DB tests: %v", gerr)
+	}
+	dsn = guarded
 	pg, err := db.Open(dsn)
 	if err != nil {
 		t.Skipf("postgres unavailable (%v) — skipping", err)

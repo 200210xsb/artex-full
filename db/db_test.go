@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"github.com/Autumn-27/artex/internal/testdb"
 	"testing"
 	"time"
 
@@ -53,13 +54,20 @@ func TestApplySchemaRetriesOnlyDeadlocks(t *testing.T) {
 
 // testDSN returns the configured DSN, skipping the test when neither the env var
 // nor a config file supplies one (DSN no longer has a built-in default).
+//
+// The DSN is additionally guarded: the suites write and delete rows, so they
+// must never point at a live database (see internal/testdb for why).
 func testDSN(t *testing.T) string {
 	t.Helper()
 	dsn, _, err := DSN()
 	if err != nil {
 		t.Skipf("no database config (%v) — skipping", err)
 	}
-	return dsn
+	guarded, err := testdb.Guard(dsn)
+	if err != nil {
+		t.Skipf("skipping DB tests: %v", err)
+	}
+	return guarded
 }
 
 // TestOpenSeed opens the live dev PG, applies schema, seeds, and verifies the

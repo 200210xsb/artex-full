@@ -10,6 +10,7 @@ import (
 
 	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/artex/intercept"
+	"github.com/Autumn-27/artex/internal/testdb"
 )
 
 func TestInterceptDetailHTTP(t *testing.T) {
@@ -17,6 +18,11 @@ func TestInterceptDetailHTTP(t *testing.T) {
 	if err != nil {
 		t.Skip("no test database configured")
 	}
+	guarded, gerr := testdb.Guard(dsn)
+	if gerr != nil {
+		t.Skipf("skipping DB tests: %v", gerr)
+	}
+	dsn = guarded
 	d, err := db.Open(dsn)
 	if err != nil {
 		t.Fatal(err)

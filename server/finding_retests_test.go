@@ -17,6 +17,7 @@ import (
 	"github.com/Autumn-27/artex/agent"
 	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/artex/intercept"
+	"github.com/Autumn-27/artex/internal/testdb"
 	"github.com/Autumn-27/norma/llm"
 	actool "github.com/Autumn-27/norma/tool"
 )
@@ -40,6 +41,11 @@ func newRetestServer(t *testing.T) (*Server, int64) {
 	if err != nil {
 		t.Skip("test postgres not configured")
 	}
+	guarded, gerr := testdb.Guard(dsn)
+	if gerr != nil {
+		t.Skipf("skipping DB tests: %v", gerr)
+	}
+	dsn = guarded
 	pg, err := db.Open(dsn)
 	if err != nil {
 		t.Fatal(err)
