@@ -248,9 +248,11 @@ func quakeSearch(ctx context.Context, token, query string, size int) ([]hostPort
 	if err != nil {
 		return nil, err
 	}
+	// Quake 的 code 有时是数字（0），有时是字符串（"q5000"）——用 RawMessage
+	// 收，两种都能解析；直接声明成 json.Number 会在字符串时整个解析失败。
 	var v struct {
-		Code    json.Number `json:"code"`
-		Message string      `json:"message"`
+		Code    json.RawMessage `json:"code"`
+		Message string          `json:"message"`
 		Data    []struct {
 			IP   string `json:"ip"`
 			Port int    `json:"port"`
@@ -260,12 +262,13 @@ func quakeSearch(ctx context.Context, token, query string, size int) ([]hostPort
 		return nil, fmt.Errorf("Quake 响应解析失败")
 	}
 	// Quake 用 code 表达业务错误：0=成功，其余（限流/配额/鉴权）都要报出来。
-	if v.Code != "" && v.Code != "0" {
+	code := strings.Trim(strings.TrimSpace(string(v.Code)), `"`)
+	if code != "" && code != "0" {
 		msg := v.Message
 		if msg == "" {
-			msg = "code " + v.Code.String()
+			msg = "code " + code
 		}
-		return nil, fmt.Errorf("Quake 返回 %s：%s", v.Code.String(), msg)
+		return nil, fmt.Errorf("Quake 返回 %s：%s", code, msg)
 	}
 	var out []hostPort
 	for _, d := range v.Data {

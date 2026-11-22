@@ -330,8 +330,10 @@ func (s *Scanner) run(ctx context.Context, scanID int64, opts Options) {
 			}
 			// 诊断：这一轮到底发生了什么，界面要能显示出来。
 			errText := ""
+			rawErr := ""
 			if lerr != nil {
-				errText = "，" + lerr.Error()
+				rawErr = lerr.Error()
+				errText = "，" + rawErr
 			}
 			s.logf("泄漏狩猎第 %d 轮：抓取 %d 个 URL，命中 %d 条 key（累计 %d）%s%s", round, fetched, found, s.keysNow(), verified, errText)
 
@@ -354,7 +356,7 @@ func (s *Scanner) run(ctx context.Context, scanID int64, opts Options) {
 			}
 			s.mu.Lock()
 			s.lastRound, s.lastCands, s.lastFetched, s.lastFound = round, fetched, fetched, found
-			s.lastErr = errText
+			s.lastErr = rawErr
 			s.roundsNoGain = noGain
 			if stopReason != "" {
 				s.stopReason = stopReason

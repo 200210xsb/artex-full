@@ -227,7 +227,10 @@ func (d *DB) StartLLMScan(total int) (int64, error) {
 
 // UpdateLLMScan 更新进度。
 func (d *DB) UpdateLLMScan(id int64, done, assets, keys int, status, note string) error {
-	_, err := d.Exec(`UPDATE llm_scans SET done=$2, assets=$3, keys=$4, status=COALESCE(NULLIF($5,''),status), note=$6,
+	// note 用 COALESCE(NULLIF(...))：空 note 不覆盖已有内容。
+	// 之前是无条件覆盖，扫描收尾时那次"空 note"更新会把轮次信息
+	// （第几轮、抓了多少、为什么停）整段抹掉，界面上就只剩一个空状态。
+	_, err := d.Exec(`UPDATE llm_scans SET done=$2, assets=$3, keys=$4, status=COALESCE(NULLIF($5,''),status), note=COALESCE(NULLIF($6,''),note),
 finished_at=CASE WHEN $5 IN ('done','failed','stopped') THEN now() ELSE finished_at END WHERE id=$1`,
 		id, done, assets, keys, status, note)
 	return err
