@@ -859,7 +859,6 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/llmhunt/keys/{id}/reveal", s.llmHuntReveal)
 	mux.HandleFunc("DELETE /api/llmhunt/keys/{id}", s.llmHuntDeleteKey)
 	mux.HandleFunc("DELETE /api/llmhunt/assets/{id}", s.llmHuntDeleteAsset)
-	mux.HandleFunc("GET /llmhunt", s.llmHuntPage)
 	mux.HandleFunc("GET /api/vpn", s.listVPNProfiles)
 	mux.HandleFunc("POST /api/vpn", s.saveVPNProfile)
 	mux.HandleFunc("DELETE /api/vpn/{id}", s.deleteVPNProfile)
@@ -1061,6 +1060,14 @@ func (s *Server) Handler() http.Handler {
 	root.HandleFunc("/device-bridge", s.deviceBridgeWS)
 	// 接入代理 APK：手机浏览器直接下，不走登录态。
 	root.HandleFunc("/device-agent.apk", s.deviceAgentAPK)
+	// 旧的大模型测绘独立页（/llmhunt）已并入 SPA（/function/llm-hunt）。
+	// 那份独立页自包含 HTML，从初版起就再没更新过（字段比 SPA 少、界面也缺了
+	// 后续的多维筛选/状态区分/导出），而且它挂在 api mux 上（实际路径是
+	// /api/llmhunt），网页上的 /llmhunt 一直由 SPA 兜底 → 404。保留旧书签可用，
+	// 直接跳到正式页面。
+	root.HandleFunc("/llmhunt", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/function/llm-hunt", http.StatusFound)
+	})
 	// 记录代理 CA：手机装了它才能解 HTTPS 明文。
 	root.HandleFunc("/device-ca.pem", s.deviceCA)
 	root.Handle("/", s.webuiHandler())
