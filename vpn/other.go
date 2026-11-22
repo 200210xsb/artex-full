@@ -25,4 +25,7 @@ func (m *Manager) teardown(inst *instance) {
 
 func probeVia(_, _ string) (string, error) { return "", ErrUnsupported }
 
+// probeRawVia 在非 Linux 平台没有隧道可探，与 probeVia 同签名地报不支持。
+func probeRawVia(_, _ string) (string, int, error) { return "", 0, ErrUnsupported }
+
 var _ = errors.New

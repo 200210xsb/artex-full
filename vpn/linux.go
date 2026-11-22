@@ -207,33 +207,51 @@ func (m *Manager) bringUp(ctx context.Context, inst *instance) error {
 		return fmt.Errorf("隧道内 SOCKS 未就绪: %w", err)
 	}
 
-	// 数据通道刚建好时第一次探测可能落空（部分服务端先跑完 keepalive 才放行流量），
-	// 给它几次机会，别把"慢一拍"误判成"连不上"。
-	var ip string
-	var probeErr error
-	// 指数退避 2s/4s/8s + 多端点（域名型→IP 型）：内网 DNS 抖动窗口实测可达
-	// 10~20 秒，固定 2s 三连发全落窗口里；IP 型端点绕开 DNS 不受其影响。
+	// 分两步验：
+	//
+	//  1. 连通性——用 IP 字面量端点，任何 HTTP 响应都算通。它不依赖 DNS，所以
+	//     隧道 push 的内网 DNS 抽风时依然能给出准确结论。
+	//  2. 出口地址——域名型回显端点的 200 响应体即出口 IP。这个要 DNS，隧道内
+	//     DNS 不可用时可能取不到。
+	//
+	// 旧实现把两者合成一步：域名端点取不到 IP 就判定「连不上」，把刚建好的隧道
+	// 连同命名空间一起销毁（实测漏洞盒子 DNS 抖动窗口 10~20 秒 → 好隧道被误杀）。
+	// 现在：连通性不过才销毁；只是拿不到出口 IP 时保留隧道（出口显示为未知），
+	// 只有在用户明确要求核对出口 IP（ExpectEgress 非空）而核不出来时才失败关闭。
+	var liveErr error
+	live := false
 	backoffs := []time.Duration{2 * time.Second, 4 * time.Second, 8 * time.Second}
-	for attempt := 1; attempt <= 3; attempt++ {
-		for _, u := range m.probeURLs {
-			ip, probeErr = probeVia(addr, u)
-			if probeErr == nil && ip != "" {
+	for attempt := 1; attempt <= 3 && !live; attempt++ {
+		for _, u := range m.liveURLs {
+			if _, _, err := probeRawVia(addr, u); err == nil {
+				live = true
 				break
+			} else {
+				liveErr = err
 			}
 		}
-		if probeErr == nil && ip != "" {
-			break
-		}
-		if attempt < 3 {
+		if !live && attempt < 3 {
 			time.Sleep(backoffs[attempt-1])
 		}
 	}
-	if probeErr != nil || ip == "" {
+	if !live {
 		m.destroyNS(inst)
 		m.freeSlot(slot)
-		return fmt.Errorf("出口探测失败: %v", probeErr)
+		return fmt.Errorf("出口探测失败: %v", liveErr)
 	}
-	if want := strings.TrimSpace(p.ExpectEgress); want != "" && ip != want {
+
+	// 出口地址：拿到就记下来核对；取不到时，若用户要求核对则失败关闭，否则保留
+	// 隧道（它确实在通），出口显示未知。
+	ip, egressErr := m.probeEgress(addr)
+	want := strings.TrimSpace(p.ExpectEgress)
+	if ip == "" {
+		if want != "" {
+			m.destroyNS(inst)
+			m.freeSlot(slot)
+			return fmt.Errorf("出口 IP 核对失败（隧道已通但取不到出口地址）: %v", egressErr)
+		}
+		m.logf("[vpn] %s 隧道已通，但暂时取不到出口地址（%v）；不影响使用", p.Name, egressErr)
+	} else if want != "" && ip != want {
 		m.destroyNS(inst)
 		m.freeSlot(slot)
 		return fmt.Errorf("出口 IP 不符：实际 %s，预期 %s", ip, want)
@@ -241,7 +259,11 @@ func (m *Manager) bringUp(ctx context.Context, inst *instance) error {
 
 	inst.socksAddr = addr
 	inst.egressIP = ip
-	m.logf("[vpn] %s 就绪：socks5://%s 出口 %s", p.Name, addr, ip)
+	if ip != "" {
+		m.logf("[vpn] %s 就绪：socks5://%s 出口 %s", p.Name, addr, ip)
+	} else {
+		m.logf("[vpn] %s 就绪：socks5://%s 出口未知", p.Name, addr)
+	}
 	return nil
 }
 
@@ -485,6 +507,17 @@ func probeVia(socksAddr, url string) (string, error) {
 	}
 	client := &httpClient{dial: dialer.Dial}
 	return client.get(url)
+}
+
+// probeRawVia 经 SOCKS 取一次响应，只关心「有没有响应」。任何 HTTP 状态码都算通
+// （响应本身就是隧道在承载流量的证据）；只有传输层失败才返回错误。
+func probeRawVia(socksAddr, url string) (string, int, error) {
+	dialer, err := xproxy.SOCKS5("tcp", socksAddr, nil, xproxy.Direct)
+	if err != nil {
+		return "", 0, err
+	}
+	client := &httpClient{dial: dialer.Dial}
+	return client.getRaw(url)
 }
 
 func defaultIface() (string, error) {

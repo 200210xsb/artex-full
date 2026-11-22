@@ -90,7 +90,14 @@ type Manager struct {
 	activeBinding ActiveBinding
 	dir           string   // where generated configs and credential files live
 	singbox       string   // sing-box binary used as the in-namespace SOCKS server
-	probeURLs     []string // 出口回显端点（域名型在前，IP 型兜底；IP 型绕开 DNS）
+	// liveURLs 是「隧道是否还通」的探测端点：必须是 **IP 字面量**（不依赖 DNS），
+	// 且任何 HTTP 状态码都算通——响应本身就是隧道在承载流量的证据。
+	// 隧道 push 的内网 DNS 会间歇性不可达（实测漏洞盒子），拿域名型端点判断连通性
+	// 会把「只有 DNS 坏了」误判成「隧道断了」，进而拆掉一条好隧道。
+	liveURLs []string
+	// egressURLs 是「出口 IP 是多少」的回显端点：域名型，200 响应体即出口地址。
+	// 只在需要核对出口时用（建链时、或用户手动刷新），不参与连通性判定。
+	egressURLs []string
 
 	mu     sync.Mutex
 	items  map[string]*instance
@@ -108,9 +115,11 @@ func New(dir, singbox string) *Manager {
 	return &Manager{
 		dir:     dir,
 		singbox: singbox,
-		// probeURLs 按序尝试：域名型在前（信息全），IP 型兜底——内网 DNS 间歇性
-		// 不可达时域名解析会卡死 getaddrinfo，IP 型端点绕开 DNS 直接回显出口。
-		probeURLs: []string{"http://ip.3322.net", "http://1.1.1.1"},
+		// 连通性用 IP 字面量端点：不依赖 DNS，且 http://1.1.1.1 会 301 跳到 https，
+		// 这里只取「有没有响应」，跳转与否无所谓（vpn/http.go 里已禁掉跟随重定向）。
+		liveURLs: []string{"http://1.1.1.1/", "http://1.0.0.1/"},
+		// 出口地址用域名型端点：响应体就是出口 IP（ip.3322.net 专门做这个）。
+		egressURLs: []string{"http://ip.3322.net"},
 		items:     map[string]*instance{},
 		slots:     map[int]bool{},
 		logf:      log.Printf,
@@ -459,34 +468,55 @@ func (m *Manager) reapIdle() {
 	}
 }
 
-// probe reports whether the tunnel currently carries traffic, and that the exit
-// address is the one the profile promised.
+// probe 判断隧道是否还在承载流量。
+//
+// 判据是「有没有拿到 HTTP 响应」，不是「有没有拿到出口 IP」：出口 IP 要靠域名型
+// 回显端点，而隧道 push 的内网 DNS 会间歇性不可达（实测漏洞盒子，窗口 10~20 秒），
+// 那段时间里拿不到 IP 但隧道其实好好的。旧判据会把这种假失败当成断链，monitor
+// 连续两次就拆链，于是好隧道被反复重建（用户看到的「VPN 又没了」）。
+//
+// 端点用 IP 字面量，不依赖 DNS；且不跟随重定向（http://1.1.1.1 会跳 https，
+// 跟过去会撞上无 SNI 的 TLS 握手失败）。
 func (m *Manager) probe(socksAddr string) error {
 	if socksAddr == "" {
 		return errors.New("隧道未就绪")
 	}
-	// 每轮探测先试全部端点（域名型→IP 型），3 轮、指数退避。IP 型端点绕开
-	// DNS：VPN push 的内网 DNS 间歇性不可达时（实测漏洞盒子），域名解析卡死
-	// getaddrinfo 导致探测假失败 → monitor 误拆隧道 → 每 ~10 分钟重建循环。
 	var lastErr error
 	backoffs := []time.Duration{2 * time.Second, 4 * time.Second, 8 * time.Second}
 	for i := 0; i < 3; i++ {
 		if i > 0 {
 			time.Sleep(backoffs[i-1])
 		}
-		for _, u := range m.probeURLs {
-			ip, err := probeVia(socksAddr, u)
-			if err == nil && ip != "" {
-				return nil
+		for _, u := range m.liveURLs {
+			_, _, err := probeRawVia(socksAddr, u)
+			if err == nil {
+				return nil // 任何响应都算隧道在通
 			}
-			if err != nil {
-				lastErr = err
-			} else {
-				lastErr = errors.New("出口未返回地址")
-			}
+			lastErr = err
 		}
 	}
 	return lastErr
+}
+
+// probeEgress 取当前出口地址（域名型回显端点，响应体即出口 IP）。
+// 隧道内 DNS 不可用时返回错误——这不代表隧道断了，只代表此刻拿不到出口地址。
+func (m *Manager) probeEgress(socksAddr string) (string, error) {
+	if socksAddr == "" {
+		return "", errors.New("隧道未就绪")
+	}
+	var lastErr error
+	for _, u := range m.egressURLs {
+		ip, err := probeVia(socksAddr, u)
+		if err == nil && ip != "" {
+			return ip, nil
+		}
+		if err != nil {
+			lastErr = err
+		} else {
+			lastErr = errors.New("出口未返回地址")
+		}
+	}
+	return "", lastErr
 }
 
 // normalizeShort renders config notes for logs.
