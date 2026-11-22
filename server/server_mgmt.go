@@ -849,7 +849,9 @@ func (s *Server) pgListMCP(w http.ResponseWriter, r *http.Request) {
 	if pg == nil {
 		return
 	}
-	ms, err := pg.ListMCP()
+	// 用 ListMCPForDisplay：env 里疑似密钥的值（X-API-Key / Authorization…）以占位符
+	// 回，不把真凭据发到浏览器。内部调用请继续用 ListMCP。
+	ms, err := pg.ListMCPForDisplay()
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return

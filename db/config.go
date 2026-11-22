@@ -924,9 +924,43 @@ func (d *DB) SaveMCP(m *MCPServer) (int64, error) {
 			m.Name, m.Transport, m.Command, args, env, m.URL, m.Enabled, m.Insecure, m.Description).Scan(&id)
 		return id, err
 	}
-	_, err := d.Exec(`UPDATE mcp_servers SET name=$1,transport=$2,command=NULLIF($3,''),args=$4,env=$5,url=NULLIF($6,''),enabled=$7,insecure=$8,description=$9 WHERE id=$10`,
+	// 更新时不能拿前端回传的 env 直接盖库：编辑框回显的是掩码值（见 maskMCPEnv），
+	// 而只改名字/开关的部分更新根本不带 env。两情况都会把库里的密钥顶掉，
+	// 所以先按 mergeMCPEnv 把占位符还原成旧值、没带 env 时保留整块旧 env。
+	storedEnv, err := d.mcpEnvByID(m.ID)
+	if err != nil {
+		return m.ID, err
+	}
+	env = string(mergeMCPEnv(storedEnv, []byte(env)))
+	_, err = d.Exec(`UPDATE mcp_servers SET name=$1,transport=$2,command=NULLIF($3,''),args=$4,env=$5,url=NULLIF($6,''),enabled=$7,insecure=$8,description=$9 WHERE id=$10`,
 		m.Name, m.Transport, m.Command, args, env, m.URL, m.Enabled, m.Insecure, m.Description, m.ID)
 	return m.ID, err
+}
+
+// mcpEnvByID 读某个 MCP 已存的 env（原始值，未掩码）。
+func (d *DB) mcpEnvByID(id int64) ([]byte, error) {
+	var env []byte
+	err := d.QueryRow(`SELECT env FROM mcp_servers WHERE id=$1`, id).Scan(&env)
+	if err != nil {
+		return nil, err
+	}
+	return env, nil
+}
+
+// ListMCPForDisplay 返回给前端用的 MCP 列表：env 里疑似密钥的值已换成占位符，
+// 路径之类的普通值照原样回。内部逻辑请继续用 ListMCP（要真值）。
+func (d *DB) ListMCPForDisplay() ([]*MCPServer, error) {
+	all, err := d.ListMCP()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*MCPServer, 0, len(all))
+	for _, m := range all {
+		c := *m
+		c.Env = json.RawMessage(maskMCPEnv(m.Env))
+		out = append(out, &c)
+	}
+	return out, nil
 }
 
 func (d *DB) DeleteMCP(id int64) error {

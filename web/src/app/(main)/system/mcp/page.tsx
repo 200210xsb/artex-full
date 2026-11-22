@@ -337,6 +337,10 @@ export default function MCPPage() {
             value={form.env}
             onChange={(e) => setF({ env: e.target.value })}
           />
+          <p className="text-muted-foreground text-xs">
+            密钥类字段（名字里带 KEY / TOKEN / SECRET / PASSWORD / AUTH 的）不会回显，
+            显示为占位符。占位符原样保存即表示保持原值；要换密钥就把那一行整个改成新值。
+          </p>
         </div>
       </div>
     );
