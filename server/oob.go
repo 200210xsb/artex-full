@@ -552,6 +552,12 @@ func (s *Server) oobPayloads(w http.ResponseWriter, r *http.Request) {
 
 	var token string
 	if err := db.QueryRow(`SELECT token FROM sessions WHERE id = ?`, sessionID).Scan(&token); err != nil {
+		if sessionID == "ext" {
+			// 外部来访会话是合成会话（sessions 表里没有行）：没有 token、没有
+			// 能力判定、没有可投喂载荷——返回空结构而不是 404，前端能正常渲染。
+			writeJSON(w, 200, map[string]any{"payloads": []map[string]any{}, "warning": "外部来访不支持投喂载荷"})
+			return
+		}
 		writeErr(w, 404, "session not found")
 		return
 	}
