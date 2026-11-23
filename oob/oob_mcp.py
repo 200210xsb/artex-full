@@ -508,7 +508,15 @@ def record_external(method, host, path, query, remote_ip, remote_port, ua,
                 "SELECT COUNT(*) FROM hits WHERE origin='external'"
             ).fetchone()[0]
             if total >= MAX_EXTERNAL_HITS:
-                return
+                # 滚动淘汰最旧的外部记录，给新来访腾位。原来的『达到上限直接丢弃』
+                # 会让监听器饱和后对外部来访全聋（实测 300 条满后 24h+ 零新记录，
+                # 连本机自测都不落库）。
+                conn.execute(
+                    "DELETE FROM hits WHERE id IN (SELECT id FROM hits "
+                    "WHERE origin='external' ORDER BY ts ASC, id ASC LIMIT ?)",
+                    (max(1, total - MAX_EXTERNAL_HITS + 10),),
+                )
+                conn.commit()
             dup = conn.execute(
                 "SELECT 1 FROM hits WHERE origin='external' AND remote_ip=? AND path=? "
                 "AND ts > ? LIMIT 1",
