@@ -27,7 +27,9 @@ import (
 
 // version is the build version, injected at release time via
 // -ldflags "-X main.version=<tag>". Defaults to "dev" for local builds.
-var version = "dev"
+// 本地/手动构建的默认版本号。CI 的 release 流程会用 -ldflags 注入 git tag。
+// 改为 1.0.0：手动构建也带正式版本号，一键更新不再因 "dev" 被禁用。
+var version = "1.0.0"
 
 const banner = `
     _    ____ _____ _______  __
