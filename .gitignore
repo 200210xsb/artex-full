@@ -57,4 +57,5 @@ Thumbs.db
 # bench 基准测试相关（本地产物，不提交）
 /bench/
 /Dockerfile.bench
-/Dockerfile.bench.v2
+/Dockerfile.bench.v2skills/vps-manager/keys/*.pem
+skills/vps-manager/keys/
