@@ -231,7 +231,7 @@ func (s *Server) llmHuntScan(w http.ResponseWriter, r *http.Request) {
 		HuntLeaks:       req.HuntLeaks,
 		Repeat:          req.Repeat,
 		AutoVerify:      req.AutoVerify,
-		RepeatEvery:     time.Duration(maxInt(req.RepeatMinutes, 5)) * time.Minute,
+		RepeatEvery:     time.Duration(maxInt(req.RepeatMinutes, 15)) * time.Minute,
 		MaxRounds:       req.MaxRounds,
 		StopAfterNoGain: req.StopAfterNoGain,
 		// 探测目标走全局代理出口（不暴露 VPS 自己的 IP）。

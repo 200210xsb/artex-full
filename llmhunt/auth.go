@@ -72,15 +72,29 @@ var authChecks = []authCheck{
 }
 
 // defaultCreds 是每个平台最多试的两组默认口令。刻意保持极小：这不是爆破。
+// 按目标圈子的真实分布排的：one-api/new-api 站长最常用的弱口令在前。
+// 仍保持纪律：遇 429/423/403 立即停、命中即止，不做爆破。
 var defaultCreds = [][2]string{
 	{"root", "123456"},
-	{"admin", "admin"},
 	{"admin", "123456"},
-	{"admin", "password"},
-	{"test", "test"},
-	{"guest", "guest"},
+	{"admin", "admin"},
+	{"admin", "admin123"},
+	{"admin", "888888"},
+	{"admin", "666666"},
+	{"admin", "admin888"},
 	{"root", "root"},
-	{"user", "user"},
+	{"root", "password"},
+	{"root", "admin"},
+	{"user", "123456"},
+	{"test", "test"},
+	{"test", "123456"},
+	{"guest", "guest"},
+	{"api", "123456"},
+	{"demo", "demo"},
+	{"admin1", "123456"},
+	{"apiuser", "123456"},
+	{"ai", "123456"},
+	{"llm", "123456"},
 }
 
 // tryDefaultAuth 尝试默认口令；成功则带 token 去读 key 接口。

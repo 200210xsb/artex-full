@@ -96,6 +96,20 @@ func (s *Scanner) huntLeaks(ctx context.Context) (int, int, error) {
 		cands = append(cands, u)
 	}
 
+	// ③ 深挖已发现站点（deep-dive）：llm_assets 里的已知网关/泄漏站每轮重新
+	// 探测一轮（绕过 seenLeak）。这些站点是"已被证明有 key"的，值得多花预算；
+	// 数据源（Quake/Hunter）的新候选反而是小时级才更新一次。
+	for _, st := range s.knownLeakSites(ctx, 12) {
+		if ctx.Err() != nil || len(cands) >= leakMaxURL {
+			break
+		}
+		if seen[st] {
+			continue
+		}
+		seen[st] = true
+		cands = append(cands, st)
+	}
+
 	var lastErr error
 	if k.Hunter != "" {
 		for _, lq := range hunterLeakQueries {
@@ -348,4 +362,24 @@ func (s *Scanner) extractKeysFrom(srcURL, body, sourceKind string) int {
 		s.mu.Unlock()
 	}
 	return n
+}
+
+// knownLeakSites 从 llm_assets 取已发现的站点（最近命中的优先），供深挖。
+// 这些站点已证明泄漏过 key/配置，是重复价值最高的目标。
+func (s *Scanner) knownLeakSites(ctx context.Context, limit int) []string {
+	rows, err := s.pg.Query(`SELECT url FROM llm_assets
+WHERE last_seen > now() - interval '7 days'
+ORDER BY last_seen DESC LIMIT $1`, limit)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var u string
+		if rows.Scan(&u) == nil && u != "" {
+			out = append(out, u)
+		}
+	}
+	return out
 }

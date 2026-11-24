@@ -151,11 +151,11 @@ export default function LLMHuntPage() {
         method: "POST",
         body: JSON.stringify({
           seeds, from_assets: fromAssets, use_search: useSearch, hunt_leaks: huntLeaks,
-          allow_auth: allowAuth, repeat, repeat_minutes: 5, auto_verify: autoVerify,
-          confirm: autoVerify,
+          allow_auth: allowAuth, repeat, repeat_minutes: 5,
+          auto_verify: autoVerify, confirm: true,
         }),
       });
-      toast.success(repeat ? "已开始持续狩猎（每 5 分钟一轮）" : "已开始狩猎");
+      toast.success(repeat ? "已开始持续狩猎（每 6 小时一轮）" : "已开始狩猎");
       load();
     } catch (e) {
       toast.error("启动失败：" + (e as Error).message);
