@@ -2208,12 +2208,15 @@ LIMIT $1`, limit)
 
 // hasActiveVPNBinding 报告某 VPN profile 是否仍被**运行中**的任务绑定。
 // 任务暂停/结束（status != running）不算占用，其隧道到宽限期就回收。
-func (m *Manager) hasActiveVPNBinding(profileID int64) bool {
+func (m *Manager) hasActiveVPNBinding(profileID int64, username string) bool {
 	var n int
+	// 账号也要对上：隧道是"每账号一条"，只看 profile 会把别的账号的任务算成
+	// 占用，导致那条早已没人用的隧道永远回收不掉。
 	err := m.pg.QueryRow(`
 SELECT count(*) FROM tasks
 WHERE coalesce(egress,'') = $1
-  AND status IN ('running','created')`, fmt.Sprintf("vpn:%d", profileID)).Scan(&n)
+  AND coalesce(vpn_username,'') = $2
+  AND status IN ('running','created')`, fmt.Sprintf("vpn:%d", profileID), strings.TrimSpace(username)).Scan(&n)
 	if err != nil {
 		// 查不到就保守起见：当作有占用，不回收（宁可隧道多挂一会，也不能把正在
 		// 跑的任务的出口拆了）。

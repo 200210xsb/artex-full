@@ -88,8 +88,8 @@ type Manager struct {
 	// activeBinding 由 server 注入：某 profile 是否还有任务绑定且在跑。
 	// 为 nil 时退化为纯空闲判定（旧行为）。
 	activeBinding ActiveBinding
-	dir           string   // where generated configs and credential files live
-	singbox       string   // sing-box binary used as the in-namespace SOCKS server
+	dir           string // where generated configs and credential files live
+	singbox       string // sing-box binary used as the in-namespace SOCKS server
 	// liveURLs 是「隧道是否还通」的探测端点：必须是 **IP 字面量**（不依赖 DNS），
 	// 且任何 HTTP 状态码都算通——响应本身就是隧道在承载流量的证据。
 	// 隧道 push 的内网 DNS 会间歇性不可达（实测漏洞盒子），拿域名型端点判断连通性
@@ -120,9 +120,9 @@ func New(dir, singbox string) *Manager {
 		liveURLs: []string{"http://1.1.1.1/", "http://1.0.0.1/"},
 		// 出口地址用域名型端点：响应体就是出口 IP（ip.3322.net 专门做这个）。
 		egressURLs: []string{"http://ip.3322.net"},
-		items:     map[string]*instance{},
-		slots:     map[int]bool{},
-		logf:      log.Printf,
+		items:      map[string]*instance{},
+		slots:      map[int]bool{},
+		logf:       log.Printf,
 	}
 }
 
@@ -278,9 +278,12 @@ type instance struct {
 	notes     []string
 	lastErr   string
 	since     time.Time
-	lastUsed  time.Time // 最近一次被任务取用；空闲回收据此判断
-	slot      int
-	closed    bool
+	lastUsed  time.Time // 最近一次有流量（或被任务取用）；空闲回收据此判断
+	// trafficBytes 是上次采样到的隧道内层字节数（rx+tx）。下一次采样比它大
+	// 就说明这期间真的有流量流过隧道。
+	trafficBytes uint64
+	slot         int
+	closed       bool
 
 	// 平台相关字段（linux 实现在 linux.go 里使用）
 	socksCmd *exec.Cmd
@@ -403,8 +406,13 @@ func (m *Manager) startJanitor() {
 	})
 }
 
-// ActiveBinding 由 server 层注入：报告某 profile 是否还有任务绑定且在跑。
-type ActiveBinding func(profileID int64) bool
+// ActiveBinding 由 server 层注入：报告某 profile（**且某个账号**）是否还有任务
+// 绑定且在跑。
+//
+// 为什么要带账号：隧道是"每个账号一条"（同一份 .ovpn 会被不同项目复用，账号不同
+// 出口就不同）。只按 profile 判断会把"这个 profile 下别的账号的任务"也算成占用，
+// 于是某条早已没有任务用的隧道（比如任务被删了）永远算"有占用"，回收不掉。
+type ActiveBinding func(profileID int64, username string) bool
 
 // SetActiveBindingCheck 注入占用检查（server 启动时调用一次）。
 func (m *Manager) SetActiveBindingCheck(fn ActiveBinding) {
@@ -442,7 +450,7 @@ func (m *Manager) reapIdle() {
 		// 在等远端响应、在慢慢跑长命令）。占用检查失败（DB 不可用）保守视为有占用。
 		occupied := true
 		if m.activeBinding != nil {
-			occupied = m.activeBinding(profID)
+			occupied = m.activeBinding(profID, inst.profile.Username)
 		}
 		idle := false
 		reason := ""
@@ -453,7 +461,29 @@ func (m *Manager) reapIdle() {
 				reason = "无任务占用且空闲超过 15 分钟"
 			}
 		} else if up && !lastUsed.IsZero() && time.Since(lastUsed) > idleTTL {
-			// 有占用但 30 分钟完全无流量：大概率任务卡死了，也回收（任务再取用时重建）。
+			// 有占用但 30 分钟没有流量：**先看隧道是不是其实还在跑流量**。
+			//
+			// lastUsed 过去只在 Ensure()（任务来取这条隧道）时刷新，而任务的实际
+			// 流量是 worker 的子进程直连 socks 走的，进程内看不到——于是"正在高强度
+			// 扫描"的任务，lastUsed 一直停在启动那一刻，30 分钟后被当成卡死回收，
+			// 正在跑的隧道被拆掉，任务下一次请求直接失败（用户看到的"VPN 又掉了"，
+			// 实测线上每 ~35 分钟被拆一次）。
+			//
+			// 现在改用**隧道内层接口的字节计数**判断：两次采样之间计数增长 = 流量
+			// 确实在跑 → 刷新 lastUsed 并保留隧道。
+			if bytes, ok := m.tunnelTrafficBytes(inst); ok {
+				inst.mu.Lock()
+				grew := bytes > inst.trafficBytes
+				if grew {
+					inst.trafficBytes = bytes
+					inst.lastUsed = time.Now()
+				}
+				inst.mu.Unlock()
+				if grew {
+					m.logf("[vpn] %s 仍有流量通过，保留隧道（不按空闲回收）", name)
+					continue
+				}
+			}
 			idle = true
 			reason = "有占用但空闲超过 30 分钟"
 		}

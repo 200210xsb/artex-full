@@ -520,6 +520,53 @@ func probeRawVia(socksAddr, url string) (string, int, error) {
 	return client.getRaw(url)
 }
 
+// tunnelTrafficBytes 读隧道内网接口的累计字节数（rx+tx）。
+//
+// 这是判断"隧道是否还在承载流量"最准的信号：
+//   - tun0 是 OpenVPN 的**内层**接口，字节数只统计真正流经隧道的业务流量；
+//     OpenVPN 的控制连接/保活走宿主 ns 的外层接口，不计入 → 空闲时计数**不会自己涨**。
+//   - established 连接数不能用：任务的请求是突发短连接（curl 退出连接即关），
+//     采样瞬间往往一条都没有，会把"正在高强度扫描"误判成空闲。
+//
+// 读不到（ns 不在 / 接口没了 / 权限问题）时返回 ok=false，调用方按"没有流量"处理。
+func (m *Manager) tunnelTrafficBytes(inst *instance) (uint64, bool) {
+	inst.mu.Lock()
+	ns := inst.netns
+	inst.mu.Unlock()
+	if ns == "" {
+		return 0, false
+	}
+	return tunnelBytes(ns)
+}
+
+// tunnelBytes 读命名空间里 tun0 的 rx+tx 累计字节。
+func tunnelBytes(ns string) (uint64, bool) {
+	cmd := exec.Command("ip", "netns", "exec", ns, "sh", "-c",
+		"cat /sys/class/net/tun0/statistics/rx_bytes /sys/class/net/tun0/statistics/tx_bytes 2>/dev/null")
+	out, err := cmd.Output()
+	if err != nil {
+		return 0, false
+	}
+	var total uint64
+	n := 0
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		v, perr := strconv.ParseUint(line, 10, 64)
+		if perr != nil {
+			continue
+		}
+		total += v
+		n++
+	}
+	if n < 2 {
+		return 0, false
+	}
+	return total, true
+}
+
 func defaultIface() (string, error) {
 	out, err := exec.Command("ip", "route", "get", "1.1.1.1").Output()
 	if err != nil {
