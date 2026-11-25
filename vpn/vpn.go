@@ -179,7 +179,12 @@ func (m *Manager) Ensure(ctx context.Context, p Profile) (string, error) {
 	inst.lastErr = ""
 	// 先采一个字节计数基线：否则第一次回收检查时，计数必然"比 0 大"，会被当成
 	// 有流量而白留一条空闲隧道 30 分钟。
-	if bytes, ok := m.tunnelTrafficBytes(inst); ok {
+	//
+	// 注意：这里**不能**用 m.tunnelTrafficBytes(inst)——本函数已持有 inst.mu
+	// （defer 解锁），而那个方法内部还会再拿一次锁：Go 的 mutex 不可重入 →
+	// 自死锁，整个实例的锁被永久持有，/api/vpn、/api/tasks 等碰 VPN 管理器的
+	// 接口会全部挂住（实测踩过）。此处已持锁，直接调用不拿锁的 tunnelBytes。
+	if bytes, ok := tunnelBytes(inst.netns); ok {
 		inst.trafficBytes = bytes
 	}
 	go m.monitor(inst)
