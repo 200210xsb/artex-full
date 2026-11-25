@@ -32,8 +32,28 @@ func (s *Server) listVPNProfiles(w http.ResponseWriter, r *http.Request) {
 	for _, p := range profs {
 		st := vpn.Status{ID: p.ID, Name: p.Name, State: vpn.StateStopped}
 		if s.m.vpnMgr != nil {
-			// 配置上填了默认账号时才可能在"没跑任务"的情况下就有隧道。
-			if p.Username != "" {
+			// 汇总这个 profile 下**所有账号**的隧道：只要有一条是 up，profile 就该
+			// 显示"已连接"。只看默认账号的话，任务用自己的账号建的隧道会被显示成
+			// "未连接"（用户看着就是"VPN 又掉了"——实测账号 4097 的隧道是 up 的，
+			// 但 profile 卡片显示 stopped，因为默认账号配的是 4075）。
+			best := vpn.StateStopped
+			var bestStatus vpn.Status
+			for _, ts := range s.m.vpnMgr.StatusesForProfile(p.ID) {
+				switch ts.State {
+				case vpn.StateUp:
+					best, bestStatus = vpn.StateUp, ts
+				case vpn.StateError:
+					if best != vpn.StateUp {
+						best, bestStatus = vpn.StateError, ts
+					}
+				}
+			}
+			if best == vpn.StateUp || best == vpn.StateError {
+				st = bestStatus
+				st.ID, st.Name = p.ID, p.Name
+			} else if p.Username != "" {
+				// 没有活隧道时才回落到默认账号（配置上填了默认账号时，
+				// "没跑任务"也可能已经有隧道）。
 				st = s.m.vpnMgr.Status(vpnTunnelKey(p.ID, p.Username))
 			}
 		}

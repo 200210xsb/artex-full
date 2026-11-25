@@ -233,6 +233,28 @@ func (m *Manager) Status(key string) Status {
 	return inst.snapshot()
 }
 
+// StatusesForProfile 返回某个 profile 下**所有账号**的隧道状态。
+//
+// 为什么需要它：隧道是"每账号一条"（同一份 .ovpn 被不同项目复用，账号不同出口
+// 就不同），而任务用的账号常常和 profile 上配的默认账号不同。若只按默认账号查
+// 状态，实际正在跑的隧道会被显示成"未连接"——用户看着就是"VPN 又掉了"。
+func (m *Manager) StatusesForProfile(profileID int64) []Status {
+	m.mu.Lock()
+	keys := make([]string, 0, len(m.items))
+	for k, inst := range m.items {
+		if inst != nil && inst.profile.ID == profileID {
+			keys = append(keys, k)
+		}
+	}
+	m.mu.Unlock()
+	sort.Strings(keys)
+	out := make([]Status, 0, len(keys))
+	for _, k := range keys {
+		out = append(out, m.Status(k))
+	}
+	return out
+}
+
 // Statuses returns every known profile, sorted by id.
 func (m *Manager) Statuses() []Status {
 	m.mu.Lock()
