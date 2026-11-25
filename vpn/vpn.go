@@ -117,7 +117,18 @@ func New(dir, singbox string) *Manager {
 		singbox: singbox,
 		// 连通性用 IP 字面量端点：不依赖 DNS，且 http://1.1.1.1 会 301 跳到 https，
 		// 这里只取「有没有响应」，跳转与否无所谓（vpn/http.go 里已禁掉跟随重定向）。
-		liveURLs: []string{"http://1.1.1.1/", "http://1.0.0.1/"},
+		//
+		// 端点要选**国内出口真能通的**：这些隧道（漏洞盒子/360 众测）的出口是
+		// 国内运营商网络，Cloudflare 的 1.1.1.1 和 1.0.0.1 在那边经常被过滤
+		// （实测 socks 报 "general SOCKS server failure"），拿它们探测会导致
+		// 好隧道被判死、反复重建。所以首选几家国内 DNS 的 IP：它们只要求"有
+		// 响应"（404/403 就算），不要求 200。
+		liveURLs: []string{
+			"http://223.5.5.5/",    // AliDNS
+			"http://119.29.29.29/", // DNSPod
+			"http://180.76.76.76/", // 百度 DNS
+			"http://1.1.1.1/",      // Cloudflare：国内部分出口不通，放最后兜底
+		},
 		// 出口地址用域名型端点：响应体就是出口 IP（ip.3322.net 专门做这个）。
 		egressURLs: []string{"http://ip.3322.net"},
 		items:      map[string]*instance{},
@@ -344,6 +355,33 @@ func (i *instance) snapshot() Status {
 	}
 }
 
+// noteTraffic 采样一次隧道内层字节计数，作为下次的比较基线。
+func (m *Manager) noteTraffic(inst *instance) {
+	bytes, ok := m.tunnelTrafficBytes(inst)
+	if !ok {
+		return
+	}
+	inst.mu.Lock()
+	inst.trafficBytes = bytes
+	inst.mu.Unlock()
+}
+
+// tunnelCarryingTraffic 报告自上次采样以来隧道里是否有字节流动。
+// 有 = 隧道确实在承载流量（哪怕探测端点不可达），此时不该拆它。
+func (m *Manager) tunnelCarryingTraffic(inst *instance) bool {
+	bytes, ok := m.tunnelTrafficBytes(inst)
+	if !ok {
+		return false
+	}
+	inst.mu.Lock()
+	defer inst.mu.Unlock()
+	if bytes > inst.trafficBytes {
+		inst.trafficBytes = bytes
+		return true
+	}
+	return false
+}
+
 // monitor probes the tunnel and re-establishes it when it stops carrying traffic.
 func (m *Manager) monitor(inst *instance) {
 	const (
@@ -366,8 +404,19 @@ func (m *Manager) monitor(inst *instance) {
 		if err := m.probe(addr); err == nil {
 			fails = 0
 			backoff = minBackoff
+			m.noteTraffic(inst)
 			continue
 		} else {
+			// 探测失败**不等于**隧道死了：出口网络可能屏蔽了探测端点（实测国内
+			// 出口连 1.1.1.1 都失败）。隧道里还有字节在流动 = 隧道确实在干活，
+			// 这时候拆链只会打断正在跑的任务（用户看到的就是"VPN 又掉了"，
+			// 任务下一次请求直接失败）。
+			if m.tunnelCarryingTraffic(inst) {
+				fails = 0
+				backoff = minBackoff
+				m.logf("[vpn] %s 探测失败但隧道仍有流量通过，保留隧道: %v", inst.profile.Name, err)
+				continue
+			}
 			fails++
 			m.logf("[vpn] %s 探测失败（%d/%d）: %v", inst.profile.Name, fails, maxFails, err)
 		}
