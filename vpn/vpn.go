@@ -177,6 +177,11 @@ func (m *Manager) Ensure(ctx context.Context, p Profile) (string, error) {
 	inst.since = time.Now()
 	inst.lastUsed = time.Now()
 	inst.lastErr = ""
+	// 先采一个字节计数基线：否则第一次回收检查时，计数必然"比 0 大"，会被当成
+	// 有流量而白留一条空闲隧道 30 分钟。
+	if bytes, ok := m.tunnelTrafficBytes(inst); ok {
+		inst.trafficBytes = bytes
+	}
 	go m.monitor(inst)
 	m.startJanitor()
 	return "socks5://" + inst.socksAddr, nil
