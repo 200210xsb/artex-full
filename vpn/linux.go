@@ -116,7 +116,7 @@ func (m *Manager) bringUp(ctx context.Context, inst *instance) error {
 		return errors.New("配置里没有 remote 行，无法建立隧道")
 	}
 
-	slot, hostIP, nsIP, err := m.allocSlot()
+	slot, hostIP, nsIP, err := m.claimSlotFor(inst)
 	if err != nil {
 		return err
 	}
@@ -316,6 +316,29 @@ func (m *Manager) destroyNS(inst *instance) {
 func (m *Manager) allocSlot() (slot int, hostIP, nsIP string, err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	for s := 1; s <= maxSlots; s++ {
+		if m.slots[s] {
+			continue
+		}
+		m.slots[s] = true
+		return s, fmt.Sprintf("10.201.%d.1", s), fmt.Sprintf("10.201.%d.2", s), nil
+	}
+	return 0, "", "", errors.New("同时在线的 VPN 隧道已达上限")
+}
+
+// claimSlotFor 优先复用实例原来的槽位，没有再分配新的。
+//
+// 为什么重要：socks 地址是 10.201.<slot>.2:1080，**由槽位决定**。任务的 agent
+// 在启动时就把这个地址烤进了 worker，隧道重建若换了槽位，worker 手里的地址就
+// 指向一条不存在的隧道——任务继续跑，但所有请求 fail-closed（用户看到"任务在
+// 跑但 VPN 掉了"）。粘住槽位让重建对上层透明。
+func (m *Manager) claimSlotFor(inst *instance) (slot int, hostIP, nsIP string, err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if s := inst.slot; s > 0 && s <= maxSlots && !m.slots[s] {
+		m.slots[s] = true
+		return s, fmt.Sprintf("10.201.%d.1", s), fmt.Sprintf("10.201.%d.2", s), nil
+	}
 	for s := 1; s <= maxSlots; s++ {
 		if m.slots[s] {
 			continue

@@ -65,6 +65,12 @@ const (
 // 不回收的话，每条隧道会一直占着命名空间、两个进程和约 45MB 内存。
 const idleTTL = 30 * time.Minute
 
+// occupiedIdleTTL 是"有任务绑定"的隧道多久没流量才回收。给得比 idleTTL 宽得
+// 多：planner 一轮规划就要 5~17 分钟，长命令/等远端响应期间本来就没有新流量。
+// 30 分钟会把正在跑的任务的出口拆掉（任务下一次请求直接失败），2 小时足够
+// 分辨"任务卡死"和"任务在正常长跑"。
+const occupiedIdleTTL = 2 * time.Hour
+
 // Status is a snapshot of one profile's tunnel.
 type Status struct {
 	Key       string    `json:"key"`
@@ -327,6 +333,8 @@ type instance struct {
 	trafficBytes uint64
 	slot         int
 	closed       bool
+	// building 表示"正在后台建链"，防止 reapIdle 的自动重建并发起多条。
+	building bool
 
 	// 平台相关字段（linux 实现在 linux.go 里使用）
 	socksCmd *exec.Cmd
@@ -541,33 +549,58 @@ func (m *Manager) reapIdle() {
 				idle = true
 				reason = "无任务占用且空闲超过 15 分钟"
 			}
-		} else if up && !lastUsed.IsZero() && time.Since(lastUsed) > idleTTL {
-			// 有占用但 30 分钟没有流量：**先看隧道是不是其实还在跑流量**。
-			//
-			// lastUsed 过去只在 Ensure()（任务来取这条隧道）时刷新，而任务的实际
-			// 流量是 worker 的子进程直连 socks 走的，进程内看不到——于是"正在高强度
-			// 扫描"的任务，lastUsed 一直停在启动那一刻，30 分钟后被当成卡死回收，
-			// 正在跑的隧道被拆掉，任务下一次请求直接失败（用户看到的"VPN 又掉了"，
-			// 实测线上每 ~35 分钟被拆一次）。
-			//
-			// 现在改用**隧道内层接口的字节计数**判断：两次采样之间计数增长 = 流量
-			// 确实在跑 → 刷新 lastUsed 并保留隧道。
-			if bytes, ok := m.tunnelTrafficBytes(inst); ok {
-				inst.mu.Lock()
-				grew := bytes > inst.trafficBytes
-				if grew {
-					inst.trafficBytes = bytes
-					inst.lastUsed = time.Now()
-				}
-				inst.mu.Unlock()
-				if grew {
-					m.logf("[vpn] %s 仍有流量通过，保留隧道（不按空闲回收）", name)
-					continue
-				}
+		} else if occupied && !up {
+			// 有任务绑定但隧道是停的（被 idle 回收过、或建链失败）：**自动重建**。
+			// 之前只在任务来取 ProxyAddrFor 时才重建，而任务运行期间不会再取一次，
+			// 于是隧道一旦被回收，任务就顶着"出口 —"跑（fail-closed，所有请求被
+			// 阻断），用户看到的就是"任务在跑但 VPN 掉了"。
+			inst.mu.Lock()
+			needBringUp := !inst.closed && !inst.building
+			if needBringUp {
+				inst.building = true
 			}
-			idle = true
-			reason = "有占用但空闲超过 30 分钟"
+			inst.mu.Unlock()
+			if needBringUp {
+				// 重建放在后台，别把 reapIdle 卡在 20~60 秒的拨号上。
+				go func(it *instance) {
+					ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+					defer cancel()
+					defer func() {
+						it.mu.Lock()
+						it.building = false
+						it.mu.Unlock()
+					}()
+					it.mu.Lock()
+					err := m.bringUp(ctx, it)
+					if err != nil {
+						it.state = StateError
+						it.lastErr = err.Error()
+						it.building = false
+						it.mu.Unlock()
+						m.logf("[vpn] %s 有任务绑定但隧道未就绪，自动重建失败: %v", name, err)
+						return
+					}
+					it.state = StateUp
+					it.since = time.Now()
+					it.lastUsed = time.Now()
+					it.lastErr = ""
+					it.building = false
+					it.mu.Unlock()
+					m.logf("[vpn] %s 有任务绑定但隧道未就绪，已自动重建：%s", name, it.socksAddr)
+				}(inst)
+				continue
+			}
 		}
+		// 有任务绑定且隧道在跑：**永不按空闲回收**。
+		//
+		// 之前的"30 分钟/2 小时无流量就回收"是错的：任务的实际流量是 worker 子进程
+		// 直连 socks 走的，进程内只能看到隧道内层字节计数，而 planner 一轮规划就要
+		// 5~17 分钟、长命令/等远端响应本来就没有新字节；一旦被回收，隧道实例连同
+		// 槽位被释放，worker 里烤死的 socks 地址就指向一条不存在的隧道——任务顶着
+		// "出口 —"继续跑，所有请求 fail-closed（用户看到"任务在跑但 VPN 掉了"）。
+		//
+		// 资源代价是每条绑定任务占一个命名空间，这是可以接受的：任务结束/暂停后
+		// 占用判定变成 false，下一个回收周期（15 分钟宽限）就会释放。
 		_ = up
 
 		if idle {
