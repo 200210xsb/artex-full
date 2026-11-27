@@ -1591,6 +1591,8 @@ export type FindingDiscoveryItem = {
   status?: number;
   text: string;
   hit?: boolean;
+  query?: string[];
+  body?: string;
 };
 
 export type FindingDiscoveryStep = {
@@ -1600,9 +1602,27 @@ export type FindingDiscoveryStep = {
   note?: string;
 };
 
+export type FindingDiscoveryParam = {
+  name: string;
+  type?: string;
+  value?: string;
+  location?: string;
+};
+
+export type FindingDiscoveryTarget = {
+  method: string;
+  url: string;
+  params?: FindingDiscoveryParam[];
+  asset_id?: number;
+  asset_domain?: string;
+  asset_tasks?: number[];
+  source?: string;
+};
+
 export type FindingDiscoveryPath = {
   finding: { id: number; name: string; vulnclass: string; severity: string; summary: string };
-  target_method: string;
-  target_url: string;
+  target: FindingDiscoveryTarget;
+  target_method?: string;
+  target_url?: string;
   steps: FindingDiscoveryStep[];
 };
