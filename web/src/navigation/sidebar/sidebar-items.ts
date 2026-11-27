@@ -14,6 +14,7 @@ import {
   Network,
   Plug,
   Radar,
+  Route,
   Radio,
   ScrollText,
   Settings2,
@@ -75,6 +76,8 @@ export const sidebarItems: NavGroup[] = [
       { id: "chat", title: "对话", url: "/chat", icon: MessageSquare },
       { id: "tasks", title: "任务", url: "/function/tasks", icon: Target },
       { id: "findings", title: "发现", url: "/function/findings", icon: Bug },
+      // 发现路径：把一条漏洞的溯源链渲染成白话时间线（可独立查阅）
+      { id: "discovery", title: "发现路径", url: "/function/discovery", icon: Route },
       { id: "traffic", title: "流量", url: "/function/traffic", icon: Activity },
       { id: "devices", title: "设备", url: "/function/devices", icon: Smartphone },
       { id: "commands", title: "工具执行", url: "/function/commands", icon: Terminal },

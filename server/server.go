@@ -795,6 +795,8 @@ func (s *Server) Handler() http.Handler {
 	s.registerFindingTraffic(mux)
 	mux.HandleFunc("GET /api/exploration/findings/{id}", s.getFinding)
 	mux.HandleFunc("GET /api/exploration/findings/{id}/lineage", s.findingLineage)
+	// 发现路径：把漏洞的溯源链渲染成白话时间线（溯源→目标判定→实测→证据）
+	mux.HandleFunc("GET /api/exploration/findings/{id}/discovery-path", s.findingDiscoveryPath)
 	mux.HandleFunc("POST /api/exploration/findings/{id}/deepen", s.deepenFinding)
 	mux.HandleFunc("GET /api/exploration/findings/{id}/retests", s.listFindingRetests)
 	mux.HandleFunc("GET /api/exploration/findings/retests/active", s.listActiveFindingRetests)
