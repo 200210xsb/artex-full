@@ -128,7 +128,10 @@ export default function DiscoveryPathPage() {
   const pageCount = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
   return (
-    <div data-content-padding={false} className="flex min-h-0 flex-1 flex-col overflow-hidden">
+    <div
+      data-content-padding={false}
+      className="flex h-[calc(100vh-3rem)] min-h-0 flex-col overflow-hidden"
+    >
       <div className="flex items-center gap-2 border-b border-border px-4 py-2.5">
         <RouteIcon className="text-muted-foreground size-4" />
         <h1 className="text-sm font-semibold">发现路径</h1>
@@ -245,7 +248,7 @@ export default function DiscoveryPathPage() {
       <div className="flex min-h-0 flex-1">
         {/* 左：命中的漏洞 */}
         <div className="flex w-80 shrink-0 flex-col border-r border-border">
-          <div className="scrollbar-thin min-h-0 flex-1 overflow-y-auto">
+          <div className="scrollbar-thin min-h-0 flex-1 overflow-y-scroll">
             {loading && items.length === 0 ? (
               <div className="flex flex-col gap-2 p-3">
                 {Array.from({ length: 6 }).map((_, i) => (
@@ -313,7 +316,7 @@ export default function DiscoveryPathPage() {
         </div>
 
         {/* 右：时间线 */}
-        <div className="scrollbar-thin min-w-0 flex-1 overflow-y-auto p-4">
+        <div className="scrollbar-thin min-w-0 flex-1 overflow-y-scroll p-4">
           {!selected ? (
             <p className="text-muted-foreground text-xs">左侧选一条漏洞查看它的发现路径。</p>
           ) : (
