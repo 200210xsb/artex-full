@@ -14,6 +14,7 @@ package agent
 import (
 	"encoding/json"
 	"regexp"
+	"strings"
 
 	"github.com/Autumn-27/artex/db"
 )
@@ -88,4 +89,44 @@ func guardShellGoal(ts *db.ExplorationStore, goal, evidence *db.Node) string {
 	// 查不动就不拦（宁可放过，不要让一次 DB 抖动把目标判定卡死）：usage 保持 0 时
 	// 还有会话库那条路，最后才由证据里的「未取得 shell」兜底。
 	return shellGoalVerdict(usage, ts.ID(), ShellSessionLanded, nodeText(evidence))
+}
+
+// vulnGoalRejectMsg 是「拿负向结论给漏洞类目标盖章」时回给模型的拒绝理由。
+const vulnGoalRejectMsg = `拒绝标记：这是一个漏洞类目标（vulnclass 已标注），只能由【漏洞节点】证明，
+不能用事实/观察节点（含「已验证为否」「未发现」这类排除结论）证明。
+
+「验证过了、没打出来」是**覆盖结论**，不是目标达成：
+- 需要继续找方向（换接口/换参数/换攻击面），把该类的验证做到穷尽；
+- 真正穷尽且确实不存在时，用 record_fact 记录覆盖结论即可，该目标保持未达成，
+  整个任务如实收尾为「未发现该类漏洞」，不允许把任务记成完成。`
+
+// guardVulnGoal 阻止用事实节点给「漏洞类目标」盖章。
+//
+// 线上事故：任务把 6 个漏洞类目标全部标成 met，实际 findings_total=1 —— 证据是
+// 「已确认不存在 XXX 漏洞」的排除性事实。目标文本里「确认是否存在」被当成是非题，
+// 答「否」就把目标做完了，于是任务以「完成」收场却没有任何产出。
+func guardVulnGoal(goal, evidence *db.Node) string {
+	if goal == nil || evidence == nil {
+		return ""
+	}
+	if goalVulnClass(goal) == "" {
+		return ""
+	}
+	if evidence.Kind == db.KindFinding {
+		return ""
+	}
+	return vulnGoalRejectMsg
+}
+
+// goalVulnClass 读目标节点 payload 里的 vulnclass（拆目标时按漏洞类标注）。
+func goalVulnClass(n *db.Node) string {
+	if n == nil || len(n.Payload) == 0 {
+		return ""
+	}
+	var m map[string]any
+	if err := json.Unmarshal(n.Payload, &m); err != nil {
+		return ""
+	}
+	v, _ := m["vulnclass"].(string)
+	return strings.TrimSpace(v)
 }

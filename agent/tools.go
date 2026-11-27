@@ -1269,6 +1269,10 @@ func (t *ToolSet) proveGoal() actool.CoreTool {
 			if msg := guardShellGoal(t.ts, goalNode, evidenceNode); msg != "" {
 				return actool.Errorf(msg), nil
 			}
+			// 漏洞类目标只能由漏洞节点证明：「验证为否」不是达成。
+			if msg := guardVulnGoal(goalNode, evidenceNode); msg != "" {
+				return actool.Errorf(msg), nil
+			}
 			_ = t.ts.Link(ev, db.RelProves, goal)
 			_ = t.ts.SetNodeState(goal, "met")
 			// 每标记一个目标 met，就检查本任务是否【所有目标】都已 met；若是，自动判定
