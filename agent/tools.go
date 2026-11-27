@@ -1301,6 +1301,13 @@ func (t *ToolSet) goalMet() actool.CoreTool {
 		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
 			var a struct{ Reason string }
 			_ = json.Unmarshal(in, &a)
+			// 硬门：没有目标的任务不能被判"完成"。
+			// 实测事故：目标被人工删掉/重建的空窗期里，规划者调了 goal_met，
+			// 任务以"完成"收场却一个目标都没有（随后 worker 全部退出）。空目标
+			// 集合"全部达成"是空真的陷阱，必须在这里挡掉。
+			if goals, err := t.ts.ListByKind(db.KindGoal, 1000); err == nil && len(goals) == 0 {
+				return actool.Errorf("本任务当前没有任何目标（可能正在重建目标列表），不能标记任务完成；等目标就绪后按目标逐个 prove_goal"), nil
+			}
 			t.GoalMet = true
 			t.Reason = a.Reason
 			return actool.Text("acknowledged: goal marked met"), nil

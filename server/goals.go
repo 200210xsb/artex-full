@@ -397,6 +397,17 @@ func (s *Server) createGoals(ctx context.Context, t *Task, emit func(db.Activity
 		// only path that writes here — decomposed goals are already persisted by the tool.
 		if g := strings.TrimSpace(t.GoalText()); g != "" {
 			log.Printf("[goals] task %s: LLM 目标拆解无产出，回退为「原始目标作为单目标」", t.ID)
+			// 让用户在任务时间线上直接看到"模型没产出"这件事。之前只有服务端日志：
+			// 模型额度耗尽时，任务会带着一整段规范当目标静默空转（规划 0 意图、
+			// 0 漏洞），从 UI 完全看不出是模型不可用（实测任务 621 卡了两小时）。
+			if emit != nil {
+				emit(db.Activity{
+					Worker:  "planner",
+					Kind:    "error",
+					IsError: true,
+					Summary: "LLM 目标拆解无产出：已回退为「原始目标」作为单目标。若任务随后规划不出意图，请检查该任务的 LLM 配置（额度/密钥/模型可用性）。",
+				})
+			}
 			origin, _ := t.Store.OriginFactID()
 			id, _ := t.Store.AddNode(db.KindGoal, map[string]any{"text": g}, 0, "open", "system", nil)
 			if origin > 0 && id > 0 {
